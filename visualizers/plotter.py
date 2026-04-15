@@ -22,18 +22,27 @@ class Plotter:
         """
         self._simulator = simulator
 
-    def plot(self):
+    def plot(self, reference_paths=None):
         """! The function to plot the result of the simulation.
+        @param reference_paths<list>: Optional list of waypoints [[x, y, ...], ...]
+            to overlay on the trajectory plot.
         """
         _, ax1 = plt.subplots(1, 1)
 
         ax1.set_box_aspect(1)
 
+        if reference_paths is not None:
+            ref_x = [wp[0] for wp in reference_paths]
+            ref_y = [wp[1] for wp in reference_paths]
+            ax1.plot(ref_x, ref_y, "--", color="gray", label="Reference path")
+
         ax1.plot(self._simulator.x_out[0, :],
                  self._simulator.x_out[1, :],
-                 "-o")
+                 "-o", label="Robot trajectory")
 
         ax1.set_title("Trajectory of the robot")
+
+        ax1.legend()
 
         _, ax = plt.subplots(3, 1)
 

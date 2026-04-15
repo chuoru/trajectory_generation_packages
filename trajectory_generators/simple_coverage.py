@@ -51,7 +51,7 @@ class SimpleCoverage:
 
         self._dt = dt
 
-        self._weight_values = [10, 0.1, 1, 200, 2, 100]
+        self._weight_values = [10, 0.1, 1, 200, 500, 100]
 
         self._eps = 1e-16
 
@@ -59,18 +59,34 @@ class SimpleCoverage:
         """! The function to generate the trajectory of the robot.
         @param initial_position<list>: The initial position of the robot.
         @param reference_paths<list>: The reference paths of the robot.
+            Each element is a waypoint [x, y, theta]. Must contain at least
+            N = T/dt waypoints.
         """
-        u = []
+        reference_paths_array = np.array(reference_paths).T
+
+        self._num_waypoints = reference_paths_array.shape[1]
 
         self._reference_paths = self._optimizer.parameter(self._model.nx,
-                                                          len(reference_paths))
+                                                          self._num_waypoints)
 
         self._define_problem()
+
+        self._optimizer.set_value(self._reference_paths, reference_paths_array)
+
+        self._optimizer.set_value(self._inital_position, initial_position)
 
         self._optimizer.set_initial(self._u, np.zeros(
             (self._model.nu, self._N)))
 
-        return u
+        try:
+            solution = self._optimizer.solve()
+
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            solution = self._optimizer.debug
+
+        return solution.value(self._u)
 
     # ==================================================================================================
     # PRIVATE METHODS
@@ -96,7 +112,8 @@ class SimpleCoverage:
             cost += self._stage_cost(
                 x, self._u[:, t], self._reference_paths[:, t])
 
-            cost += self._cross_track_cost(x, self._reference_paths)
+            if t < self._N - 1:
+                cost += self._cross_track_cost(x, t, self._reference_paths)
 
             x = self._model.function(x, self._u[:, t], self._dt)
 
@@ -106,39 +123,29 @@ class SimpleCoverage:
 
         self._optimizer.minimize(cost)
 
-    def _cross_track_cost(self, x, reference_paths):
+    def _cross_track_cost(self, x, t, reference_paths):
         """! The function to calculate the cross-track error.
         @param x: The current state of the robot.
+        @param t: The current time step index.
         @param reference_paths: The reference paths of the robot.
+        @note Uses squared norm (smooth everywhere) against the segment
+        [t, t+1], avoiding norm_2 (undefined gradient at zero) and
+        cs.mmin (non-differentiable).
         """
-        current_waypoint = reference_paths[:, 0]
+        previous_waypoint = reference_paths[:, t]
 
-        distances = cs.SX.ones(1)
+        current_waypoint = reference_paths[:, t + 1]
 
-        for index, waypoint in enumerate(reference_paths):
-            if index == 0:
-                continue
+        line_segment = current_waypoint - previous_waypoint
 
-            previous_waypoint = current_waypoint
+        t_hat = cs.dot(x - previous_waypoint, line_segment) / (cs.dot(
+            line_segment, line_segment) + self._eps)
 
-            current_waypoint = waypoint
+        t_star = cs.fmax(0, cs.fmin(1, t_hat))
 
-            line_segment = current_waypoint - previous_waypoint
+        projection = previous_waypoint + t_star * line_segment
 
-            t_hat = cs.dot(x - previous_waypoint, line_segment) / (cs.dot(
-                line_segment, line_segment) + self._eps)
-    
-            t_star = cs.fmax(0, cs.fmin(1, t_hat))
-
-            projection = previous_waypoint + t_star * line_segment
-
-            cross_track_error = cs.norm_2(x - projection)
-
-            distances = cs.horzcat(distances, cross_track_error)
-
-        cost = cs.mmin(distances[1:])**self._weights[5]
-
-        return cost
+        return self._weights[5] * cs.sumsqr(x - projection)
 
     def _stage_cost(self, x, u, final_position):
         """! The stage cost of the optimization problem.
