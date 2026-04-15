@@ -170,3 +170,4 @@ panoc-based/rust/navigation/tcp_iface_navigation/*
 !panoc-based/rust/navigation/tcp_iface_navigation/Cargo.lock
 fabian/
 .claude/
+panoc_*
