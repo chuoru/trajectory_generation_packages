@@ -171,3 +171,4 @@ panoc-based/rust/navigation/tcp_iface_navigation/*
 fabian/
 .claude/
 panoc_*
+reference/
