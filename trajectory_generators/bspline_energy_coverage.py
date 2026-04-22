@@ -15,9 +15,8 @@
 #                             + c2 * omega_w
 #                             + c3 * omega_w^2
 #                             + c4 * omega_w^3
-#                             + c6 * omega_w_dot
-#                             + c7 * omega_w_dot^2
-#                             + c8 * omega_w * omega_w_dot
+#                             + c5 * omega_w_dot
+#                             + c6 * omega_w_dot^2
 #
 # State-to-wheel mapping for a differential drive with half-wheelbase l and
 # wheel radius r:
@@ -31,7 +30,8 @@
 #
 # Objective:
 #   J = w_time * T_mission + w_energy * E_total
-#     = w_time * (sum(T) / nt) + w_energy * (sum(P_total_i * T_i) / nt)
+#     = w_time * (sum(T) / nt)
+#       + w_energy * (sum((P_i+P_{i+1})/2 * (T_i+T_{i+1})/2) / nt)  [trapezoid]
 #
 # @section author_doxygen_example Author(s)
 # - Created by Tran Viet Thanh on 2026/04/16
@@ -98,7 +98,7 @@ class BSplineEnergyCoverage(BSplineCoverage):
     # ==========================================================================
     def __init__(self, waypoints, bound=0.1, n_ctrl_pts=6, spline_order=3,
                  n_sampling=50, vel_max=None, vel_min_lin=0.01,
-                 eps_nonh=0.001, robot_params=None,
+                 eps_nonh=0.001, v_entry=None, v_exit=None, robot_params=None,
                  energy_coeffs_right=None, energy_coeffs_left=None,
                  w_time=1.0, w_energy=1.0, e_max=None, p_electronics=2.0):
         """! Constructor.
@@ -113,6 +113,8 @@ class BSplineEnergyCoverage(BSplineCoverage):
         @param vel_max<list|None>: [vx_max, vy_max, omega_max].
         @param vel_min_lin<float>: Minimum feedrate [m/s].
         @param eps_nonh<float>: Nonholonomic constraint tolerance.
+        @param v_entry<float|None>: Exact entry speed [m/s]. None = free.
+        @param v_exit<float|None>: Exact exit speed [m/s]. None = free.
         @param robot_params<dict|None>: Physical robot parameters.
             Keys: 'l' (half-wheelbase [m]), 'r' (wheel radius [m]).
             Missing keys fall back to _DEFAULT_ROBOT_PARAMS.
@@ -126,7 +128,8 @@ class BSplineEnergyCoverage(BSplineCoverage):
         @param p_electronics<float>: Constant hotel load (sensors, computer) [W].
         """
         super().__init__(waypoints, bound, n_ctrl_pts, spline_order,
-                         n_sampling, vel_max, vel_min_lin, eps_nonh)
+                         n_sampling, vel_max, vel_min_lin, eps_nonh,
+                         v_entry, v_exit)
 
         self._robot = {**self._DEFAULT_ROBOT_PARAMS, **(robot_params or {})}
         self._e_coeffs_right = list(
@@ -145,9 +148,13 @@ class BSplineEnergyCoverage(BSplineCoverage):
         self._e_max = e_max
         self._p_elec = float(p_electronics)
 
-    def generate_trajectory(self):
+    def generate_trajectory(self, warm_start=None):
         """! Build and solve the energy-aware OCP.
 
+        @param warm_start<dict|None>: Result dict from a previous call to
+            generate_trajectory().  When provided, the solver is warm-started
+            from that solution instead of the default linear initialisation.
+            Useful for continuation sweeps (Pareto front tracing).
         @return dict with all keys from BSplineCoverage, plus:
             - 'power'  : (nt,) total power signal P(t) over the spline [W]
             - 'energy' : float total mission energy E_total [J]
@@ -173,13 +180,25 @@ class BSplineEnergyCoverage(BSplineCoverage):
         dds  = ddot_basis   @ P_ctrl        # (nt, 3) second derivatives / dtau^2
         ddds = dddot_basis  @ P_ctrl        # (nt, 3) third derivatives / dtau^3
 
-        self._set_initial_conditions(opti, px, py, pt, T, basis)
+        if warm_start is not None:
+            opti.set_initial(px, warm_start['ctrl_pts'][:, 0])
+            opti.set_initial(py, warm_start['ctrl_pts'][:, 1])
+            opti.set_initial(pt, warm_start['ctrl_pts'][:, 2])
+            # Recover per-sample T from the previous real-time axis.
+            t_prev = warm_start['time']
+            T_prev = np.diff(t_prev) * len(t_prev)
+            T_prev = np.append(T_prev, T_prev[-1])
+            opti.set_initial(T, T_prev[:self._nt])
+        else:
+            self._set_initial_conditions(opti, px, py, pt, T, basis,
+                                         dot_basis)
 
         # --- Energy-aware objective ------------------------------------------
-        energy_sym, power_sym = self._build_energy_terms(s, ds, dds, T)
+        energy_motor_sym, energy_sym, power_sym = \
+            self._build_energy_terms(s, ds, dds, T)
         T_mission = cs.sum1(T) / self._nt
         opti.minimize(self._w_time * T_mission
-                      + self._w_energy * energy_sym)
+                      + self._w_energy * energy_motor_sym)
 
         # --- Kinodynamic + path constraints (all inherited) ------------------
         self._add_dynamic_constraints(opti, s, ds, dds, ddds, T)
@@ -243,9 +262,10 @@ class BSplineEnergyCoverage(BSplineCoverage):
         @param ds:  (nt, 3) first  B-spline derivatives w.r.t. tau.
         @param dds: (nt, 3) second B-spline derivatives w.r.t. tau.
         @param T:   (nt, 1) CasADi MX per-sample time-scaling variables.
-        @return Tuple (energy_scalar, power_column):
-            - energy_scalar: CasADi scalar expression for E_total [J].
-            - power_column:  (nt, 1) CasADi expression for P_total(t) [W].
+        @return Tuple (energy_motor, energy_total, power_column):
+            - energy_motor: CasADi scalar, motor-only energy E_motor [J] — used in objective.
+            - energy_total: CasADi scalar, total energy E_motor + P_elec·T [J] — for reporting.
+            - power_column: (nt, 1) CasADi expression for P_total(t) [W].
         """
         l = self._robot['l']
         r = self._robot['r']
@@ -274,18 +294,31 @@ class BSplineEnergyCoverage(BSplineCoverage):
                 v_fwd, omega_robot, a_fwd, alpha_robot, l, r)
 
         # --- TJ108 motor power per wheel (separate coefficient sets) ---------
-        P_r = self._tj108_power(omega_r, omega_r_dot, self._e_coeffs_right)
-        P_l = self._tj108_power(omega_l, omega_l_dot, self._e_coeffs_left)
+        # cs.fmax floors at zero: TJ108 has no regenerative braking, so
+        # negative power (from large deceleration) must not reduce the energy.
+        P_r = cs.fmax(self._tj108_power(omega_r, omega_r_dot,
+                                        self._e_coeffs_right), 0.0)
+        P_l = cs.fmax(self._tj108_power(omega_l, omega_l_dot,
+                                        self._e_coeffs_left), 0.0)
 
-        # Total electrical power at each sample (both motors + hotel load)
-        P_total = P_r + P_l + self._p_elec                          # (nt, 1)
+        # Hotel load is a constant time-proportional overhead independent of
+        # trajectory shape.  Including it in the objective would make the
+        # indifference point w_e* = ΔT/ΔE_total ≈ 10.4, well outside [0,1].
+        # Optimizing motor energy alone moves w_e* ≈ 0.48, inside the sweep.
+        P_motor = P_r + P_l                                          # (nt, 1)
+        P_total = P_motor + self._p_elec                             # for output
 
-        # --- Energy integral -------------------------------------------------
-        # E = integral P(t) dt ≈ sum_i P_i * delta_t_i
-        # Time step at sample i: delta_t_i = T_i / nt
-        energy = cs.sum1(P_total * T) / nt                          # scalar
+        T_mid = (T[:-1] + T[1:]) / 2
 
-        return energy, P_total
+        # Motor energy → objective (trapezoidal rule, O(h²))
+        P_mid_m = (P_motor[:-1] + P_motor[1:]) / 2
+        energy_motor = cs.sum1(P_mid_m * T_mid) / nt                # scalar
+
+        # Total energy → returned in result dict for reporting
+        P_mid = (P_total[:-1] + P_total[1:]) / 2
+        energy = cs.sum1(P_mid * T_mid) / nt                        # scalar
+
+        return energy_motor, energy, P_total
 
     def _calculate_wheel_dynamics(self, v_fwd, omega_robot,
                                   a_fwd, alpha_robot, l, r):

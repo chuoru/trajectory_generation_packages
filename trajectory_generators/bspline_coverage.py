@@ -35,7 +35,7 @@ class BSplineCoverage:
     # ==========================================================================
     def __init__(self, waypoints, bound=0.1, n_ctrl_pts=6, spline_order=3,
                  n_sampling=50, vel_max=None, vel_min_lin=0.01,
-                 eps_nonh=0.001):
+                 eps_nonh=0.001, v_entry=None, v_exit=None):
         """! Constructor.
         @param waypoints<list>: Via-points [[x, y, theta], ...]. At least 2.
         @param bound<float>: Half-width of the corridor around each segment [m].
@@ -46,6 +46,10 @@ class BSplineCoverage:
             [0.2, 0.2, 0.196] m/s and rad/s.
         @param vel_min_lin<float>: Minimum feedrate (||vx,vy||) [m/s].
         @param eps_nonh<float>: Nonholonomic constraint tolerance.
+        @param v_entry<float|None>: Exact linear speed [m/s] at trajectory start.
+            None leaves the entry speed free (determined by the OCP).
+        @param v_exit<float|None>: Exact linear speed [m/s] at trajectory end.
+            None leaves the exit speed free (determined by the OCP).
         """
         self._waypoints = np.array(waypoints, dtype=float)
         self._bound = bound
@@ -71,17 +75,20 @@ class BSplineCoverage:
         self._n_Q = self._n_pieces * n_ctrl_pts
         self._nt = n_sampling * (self._n_Q - 1) + 1
 
+        self._v_entry = float(v_entry) if v_entry is not None else None
+        self._v_exit  = float(v_exit)  if v_exit  is not None else None
+
         self._optimizer = cs.Opti()
         self._optimizer.solver(
             'ipopt',
             {'print_time': False},
             {
-                'max_iter': 10000,
-                'print_level': 5,
-                'tol': 1e-6,
-                'acceptable_tol': 1e-4,
-                'acceptable_iter': 25,
-                'constr_viol_tol': 1e-6,
+                'max_iter': 5000,
+                'print_level': 3,
+                'tol': 1e-5,
+                'acceptable_tol': 1e-3,
+                'acceptable_iter': 20,
+                'constr_viol_tol': 1e-4,
                 'hessian_approximation': 'limited-memory',
             }
         )
@@ -119,7 +126,7 @@ class BSplineCoverage:
         ddds = dddot_basis @ P             # (nt, 3)
 
         # Initial conditions for solver
-        self._set_initial_conditions(opti, px, py, pt, T, basis)
+        self._set_initial_conditions(opti, px, py, pt, T, basis, dot_basis)
 
         # Objective: minimize total time
         opti.minimize(cs.sum1(T))
@@ -298,7 +305,8 @@ class BSplineCoverage:
 
         return B, dB, ddB, dddB
 
-    def _set_initial_conditions(self, opti, px, py, pt, T, basis):
+    def _set_initial_conditions(self, opti, px, py, pt, T, basis,
+                               dot_basis=None):
         """! Warm-start: lay control points along the piecewise-linear path
         and initialize T so that the initial velocity equals vel_max.
         """
@@ -320,15 +328,28 @@ class BSplineCoverage:
                 opti.set_initial(pt[idx], cp0[idx, 2])
                 idx += 1
 
-        # Estimate initial spline derivatives from warm-start control points
-        # and set T so that ||vel|| ≈ vel_max (feasible starting point).
-        ds0_xy = np.linalg.norm(
-            (basis @ cp0)[:, :2], axis=1)          # ||ds/dtau|| at each sample
+        # Use spline DERIVATIVE magnitudes to estimate T so ||vel|| ~= vel_max.
+        # dot_basis @ cp0 gives ds/dtau at each sample; its xy norm is the
+        # feedrate scaling.  Fall back to position norms if dot_basis is absent.
+        if dot_basis is not None:
+            ds0_xy = np.linalg.norm((dot_basis @ cp0)[:, :2], axis=1)
+        else:
+            ds0_xy = np.linalg.norm((basis @ cp0)[:, :2], axis=1)
 
         v_max = self._vel_max[0]
         T_init = np.where(ds0_xy > 1e-8,
                           ds0_xy / v_max,
                           1.0 / v_max)
+
+        # Patch T[0] / T[-1] so the initial point approximately satisfies
+        # any velocity-BC constraints and gives IPOPT a warm feasible region.
+        if self._v_entry is not None and self._v_entry > 1e-6:
+            v0 = min(float(self._v_entry), v_max)
+            T_init[0] = ds0_xy[0] / v0 if ds0_xy[0] > 1e-8 else 1.0 / v0
+        if self._v_exit is not None and self._v_exit > 1e-6:
+            vn = min(float(self._v_exit), v_max)
+            T_init[-1] = ds0_xy[-1] / vn if ds0_xy[-1] > 1e-8 else 1.0 / vn
+
         opti.set_initial(T, T_init)
 
     def _add_dynamic_constraints(self, opti, s, ds, dds, ddds, T):
@@ -372,6 +393,30 @@ class BSplineCoverage:
 
             # T must be positive
             opti.subject_to(Ti >= 1e-4)
+
+        # Forward-only constraints at the boundary samples: the heading is
+        # effectively known (pinned by the clamped knot + boundary constraints),
+        # so these are linear in ds and T.  They prevent backward solutions
+        # at entry/exit even without explicit velocity BC.
+        theta_0 = float(self._waypoints[0, 2])
+        c0, s0 = float(np.cos(theta_0)), float(np.sin(theta_0))
+        fwd_0 = ds[0, 0] * c0 + ds[0, 1] * s0
+        opti.subject_to(fwd_0 >= self._vel_min_lin * T[0])
+
+        theta_n = float(self._waypoints[-1, 2])
+        cn, sn = float(np.cos(theta_n)), float(np.sin(theta_n))
+        fwd_n = ds[-1, 0] * cn + ds[-1, 1] * sn
+        opti.subject_to(fwd_n >= self._vel_min_lin * T[-1])
+
+        # Optional: pin entry/exit speed using a tight range (±5 %) rather
+        # than an equality so that IPOPT always has a feasible interior point.
+        if self._v_entry is not None:
+            opti.subject_to(fwd_0 >= self._v_entry * T[0])
+            opti.subject_to(fwd_0 <= self._v_entry * 1.05 * T[0])
+
+        if self._v_exit is not None:
+            opti.subject_to(fwd_n >= self._v_exit * T[-1])
+            opti.subject_to(fwd_n <= self._v_exit * 1.05 * T[-1])
 
     def _add_boundary_constraints(self, opti, px, py, pt):
         """! Pin start and end poses to the first and last waypoints."""

@@ -63,7 +63,7 @@ class EulerJLAPCoverage:
     # ------------------------------------------------------------------
     def __init__(self, waypoints, sampling_time=0.05, robot_params=None,
                  path_vel_step=0.01, epsilon_offset=0.1, lc_scale=0.4,
-                 initial_vel=0.0):
+                 initial_vel=0.0, final_vel=0.0):
         """! Constructor.
 
         @param waypoints<list>: Via-points as [[x, y], ...] or [[x, y, theta], ...].
@@ -76,6 +76,9 @@ class EulerJLAPCoverage:
         @param lc_scale<float>: Rule-of-thumb fraction of segment length
             allowed for corner Euclidean reach (0 < lc_scale < 0.5).
         @param initial_vel<float>: Robot's path velocity at the first waypoint.
+        @param final_vel<float>: Robot's path velocity at the last waypoint.
+            Defaults to 0.0 (full stop). Set to a positive value to hand off
+            velocity continuously to the next segment.
         """
         if len(waypoints) < 2:
             raise ValueError("At least 2 waypoints required.")
@@ -108,6 +111,7 @@ class EulerJLAPCoverage:
         self._eps_offset    = float(epsilon_offset)
         self._lc_scale      = float(lc_scale)
         self._initial_vel   = float(initial_vel)
+        self._final_vel     = float(final_vel)
 
         # Build Euler coefficient table once
         self._euler_table = self._build_euler_table()
@@ -143,7 +147,7 @@ class EulerJLAPCoverage:
         line_ends   = [c['pos_start'] for c in corners] + [wps[-1]]
 
         vel_starts = [self._initial_vel] + [c['vel'] for c in corners]
-        vel_ends   = [c['vel'] for c in corners] + [0.0]
+        vel_ends   = [c['vel'] for c in corners] + [self._final_vel]
 
         jlap_data = []
         for i in range(n_line):
