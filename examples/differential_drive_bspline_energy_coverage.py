@@ -52,8 +52,8 @@ COMMON_KWARGS = dict(
     n_ctrl_pts=6,
     spline_order=3,
     n_sampling=30,
-    vel_max=[0.2, 0.2, 0.196],
-    vel_min_lin=0.01,
+    vel_max=[0.75, 0.75, 0.196],
+    vel_min_lin=0.001,
     eps_nonh=0.001,
 )
 
@@ -106,8 +106,9 @@ def _compute_wheel_power(v_arr, omega_arr, robot_params, cr, cl, p_elec):
     omega_l_dot = np.gradient(omega_l, dt)
 
     def _P(ow, owd, c):
-        return (c[0] + c[1] * ow + c[2] * ow**2 + c[3] * ow**3
-                + c[4] * owd + c[5] * owd**2)
+        raw = (c[0] + c[1] * ow + c[2] * ow**2 + c[3] * ow**3
+               + c[4] * owd + c[5] * owd**2)
+        return np.maximum(raw, 0.0)
 
     P_r = _P(omega_r, omega_r_dot, cr)
     P_l = _P(omega_l, omega_l_dot, cl)
@@ -523,11 +524,13 @@ def _fig4_pareto():
     print("Figure 4: Pareto sweep  (8 IPOPT solves) …")
     print("=" * 60)
 
+    prev_res = None
     for w_t, w_e in weights:
         # Always use BSplineEnergyCoverage so that res['energy'] is computed
         # by the same B-spline-derivative formula for every point.
-        # At w_e=0 the energy term vanishes and the result is identical to
-        # BSplineCoverage, but now both metrics come from the same source.
+        # Continuation warm-start: seed each solve from the previous solution
+        # so IPOPT traces the Pareto branch smoothly instead of jumping to a
+        # different local minimum.
         gen = BSplineEnergyCoverage(
             waypoints=WAYPOINTS,
             robot_params=ROBOT_PARAMS,
@@ -537,8 +540,9 @@ def _fig4_pareto():
             p_electronics=P_ELECTRONICS,
             **COMMON_KWARGS,
         )
-        res    = gen.generate_trajectory()
-        energy = float(res['energy'])
+        res      = gen.generate_trajectory(warm_start=prev_res)
+        prev_res = res
+        energy   = float(res['energy'])
         T_total = float(res['time'][-1])
 
         # Path length
@@ -640,6 +644,7 @@ def _fig5_we_sweep():
           f"{'Peak P [W]':>10}")
     print("  " + "─" * 49)
 
+    prev_res = None
     for w_e in we_values:
         gen = BSplineEnergyCoverage(
             waypoints=WAYPOINTS,
@@ -650,7 +655,8 @@ def _fig5_we_sweep():
             p_electronics=P_ELECTRONICS,
             **sweep_kwargs,
         )
-        res    = gen.generate_trajectory()
+        res      = gen.generate_trajectory(warm_start=prev_res)
+        prev_res = res
         P_tot, P_r, P_l, _ = _compute_wheel_power(
             res['v'], res['omega'],
             ROBOT_PARAMS, ENERGY_COEFFS_RIGHT, ENERGY_COEFFS_LEFT,
