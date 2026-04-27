@@ -161,6 +161,9 @@ class EulerJLAPCoverage:
             self._interpolate(wps, corners, jlap_data,
                               line_starts, line_ends)
 
+        omega_r = (v_arr + self._l * omega_arr) / self._r
+        omega_l = (v_arr - self._l * omega_arr) / self._r
+
         return {
             'states':      states,
             'time':        times,
@@ -168,6 +171,8 @@ class EulerJLAPCoverage:
             'acc_path':    acc_arr,
             'omega':       omega_arr,
             'alpha':       alpha_arr,
+            'omega_r':     omega_r,
+            'omega_l':     omega_l,
             'corner_info': corners,
         }
 

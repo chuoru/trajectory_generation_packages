@@ -41,6 +41,7 @@ import numpy as np
 
 # External library
 import casadi as cs
+from scipy.interpolate import CubicSpline as _CubicSpline
 
 # Internal library
 from .bspline_coverage import BSplineCoverage
@@ -218,6 +219,7 @@ class BSplineEnergyCoverage(BSplineCoverage):
 
         T_val     = dbg.value(T)
         s_val     = dbg.value(s)
+        ds_val    = np.array(dbg.value(ds))
         ctrl_pts  = dbg.value(P_ctrl)
         power_val = np.array(dbg.value(power_sym)).flatten()
         energy_val = float(dbg.value(energy_sym))
@@ -225,15 +227,20 @@ class BSplineEnergyCoverage(BSplineCoverage):
         # Real time axis: t[i] = cumsum(T)[i] / nt
         t_real = np.cumsum(T_val) / self._nt
 
-        # Inverse kinematics to recover (v, omega) control inputs
-        ts_des = 0.01
-        t_interp = np.arange(ts_des, t_real[-1], ts_des)
-        states_interp = np.column_stack([
-            np.interp(t_interp, t_real, s_val[:, 0]),
-            np.interp(t_interp, t_real, s_val[:, 1]),
-            np.interp(t_interp, t_real, s_val[:, 2]),
-        ])
-        v_arr, omega_arr = self._inverse_kinematics(states_interp, ts_des)
+        # Velocity at OCP nodes from B-spline derivatives (smooth, no staircase)
+        cos_th = np.cos(s_val[:, 2])
+        sin_th = np.sin(s_val[:, 2])
+        v_ocp  = (cos_th * ds_val[:, 0] + sin_th * ds_val[:, 1]) / T_val
+        om_ocp = ds_val[:, 2] / T_val
+
+        ts_des   = 0.01
+        t_interp = np.arange(max(ts_des, t_real[0]), t_real[-1], ts_des)
+        v_arr    = _CubicSpline(t_real, v_ocp)(t_interp[:-1])
+        omega_arr = _CubicSpline(t_real, om_ocp)(t_interp[:-1])
+
+        l, r = self._robot['l'], self._robot['r']
+        omega_r_arr = (v_arr + l * omega_arr) / r
+        omega_l_arr = (v_arr - l * omega_arr) / r
 
         return {
             'states':   s_val,
@@ -241,6 +248,8 @@ class BSplineEnergyCoverage(BSplineCoverage):
             'ctrl_pts': ctrl_pts,
             'v':        v_arr,
             'omega':    omega_arr,
+            'omega_r':  omega_r_arr,
+            'omega_l':  omega_l_arr,
             'time_ik':  t_interp[:-1],
             'power':    power_val,
             'energy':   energy_val,

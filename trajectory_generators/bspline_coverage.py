@@ -20,6 +20,7 @@ import numpy as np
 # External library
 import casadi as cs
 from scipy.spatial import ConvexHull
+from scipy.interpolate import CubicSpline as _CubicSpline
 
 
 class BSplineCoverage:
@@ -152,16 +153,16 @@ class BSplineCoverage:
         # Build real time axis: t_real[i] = sum(T[0..i]) / nt
         t_real = np.cumsum(T_val) / self._nt
 
-        # Inverse kinematics to get (v, omega)
-        ts_des = 0.01
-        t_interp = np.arange(ts_des, t_real[-1], ts_des)
-        states_interp = np.column_stack([
-            np.interp(t_interp, t_real, s_val[:, 0]),
-            np.interp(t_interp, t_real, s_val[:, 1]),
-            np.interp(t_interp, t_real, s_val[:, 2]),
-        ])
+        # Velocity at OCP nodes from B-spline derivatives (smooth, no staircase)
+        cos_th = np.cos(s_val[:, 2])
+        sin_th = np.sin(s_val[:, 2])
+        v_ocp  = (cos_th * ds_val[:, 0] + sin_th * ds_val[:, 1]) / T_val
+        om_ocp = ds_val[:, 2] / T_val
 
-        v_arr, omega_arr = self._inverse_kinematics(states_interp, ts_des)
+        ts_des   = 0.01
+        t_interp = np.arange(ts_des, t_real[-1], ts_des)
+        v_arr    = _CubicSpline(t_real, v_ocp)(t_interp[:-1])
+        omega_arr = _CubicSpline(t_real, om_ocp)(t_interp[:-1])
 
         return {
             'states': s_val,
@@ -391,6 +392,10 @@ class BSplineCoverage:
             opti.subject_to(lateral <= eps * Ti)
             opti.subject_to(-eps * Ti <= lateral)
 
+            # Forward-only: projection of velocity onto heading must be >= vel_min_lin
+            fwd_i = ds[i, 0] * cs.cos(s[i, 2]) + ds[i, 1] * cs.sin(s[i, 2])
+            opti.subject_to(fwd_i >= vlin_min * Ti)
+
             # T must be positive
             opti.subject_to(Ti >= 1e-4)
 
@@ -516,7 +521,7 @@ class BSplineCoverage:
 
             # Select rows for [v, omega]
             select = np.array([[1, 0, 0], [0, 0, 1]])
-            u_body = select @ B_inv @ S_inv.T @ delta
+            u_body = select @ B_inv @ S_inv @ delta
 
             v_arr[k] = u_body[0]
             omega_arr[k] = wk

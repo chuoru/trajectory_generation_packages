@@ -80,9 +80,8 @@ V_HANDOFF = JLAP_ROBOT_PARAMS['path_vel_lim']   # 0.5 m/s
 # BSplineEnergyCoverage (corner)
 # Reduced n_ctrl_pts / n_sampling vs the full-path example so the NLP
 # stays tractable for the short corner segments (each ~1 m).
-# vel_max[0] = V_HANDOFF so the feedrate ceiling matches the JLAP cruise
-# speed: the time-optimal objective pushes entry and exit to this ceiling
-# automatically, achieving velocity continuity without any equality constraint.
+# v_entry / v_exit are pinned to V_HANDOFF via explicit NLP constraints
+# (±5 % band) so the robot enters and exits the corner at cruise speed.
 # vel_min_lin is kept small (0.01) so the BSpline is free to slow through the
 # mid-arc where omega_max=0.196 rad/s limits speed to ~0.196 m/s on a 1 m arc.
 BSPLINE_COMMON = dict(
@@ -165,18 +164,14 @@ def main():
     print("=" * 60)
     corner_wps = _build_corner_waypoints(arc_entry, arc_exit)
     sweep = _sweep_we(corner_wps)
-    opt_we = sweep['opt_we']
-    res_by_we = sweep['res_by_we']
+    opt_we      = sweep['opt_we']
+    we_time_ref = sweep['we_time_ref']
+    res_by_we   = sweep['res_by_we']
 
     # Reuse sweep results -- no re-solve needed (avoids cold-start local minima).
-    # Fall back to a fresh solve only if the sweep result for that w_e is absent.
     print()
-    print(f"  Using sweep result for time-optimal  (w_energy = 0.0)")
-    if 0.0 in res_by_we:
-        res_corner_time = res_by_we[0.0]
-    else:
-        print("  (sweep result missing -- re-solving cold)")
-        res_corner_time = _solve_corner(corner_wps, w_energy=0.0)
+    print(f"  Using sweep result for time reference (w_energy = {we_time_ref:.4f})")
+    res_corner_time = res_by_we[we_time_ref]
 
     print(f"  Using sweep result for energy-optimal (w_energy = {opt_we:.4f})")
     if opt_we in res_by_we:
@@ -188,35 +183,28 @@ def main():
 
     mA = _corner_metrics(res_corner_time)
     mB = _corner_metrics(res_corner_opt)
-    _print_corner_comparison(mA, mB, opt_we)
+    _print_corner_comparison(mA, mB, opt_we, we_time_ref)
 
     # ------------------------------------------------------------------
     # Step 2b: EulerJLAP -- segment 3 (enters at corner exit speed)
     # ------------------------------------------------------------------
-    # Read corner exit velocity from the last two OCP state samples:
-    # these are from the actual optimization solution and avoid the
-    # numerical interpolation artifacts that appear in the IK v[-1].
-    st = res_corner_opt['states']
-    tm = res_corner_opt['time']
-    dt_exit = float(tm[-1] - tm[-2])
-    if dt_exit > 1e-8:
-        dx_exit = float(st[-1, 0] - st[-2, 0])
-        dy_exit = float(st[-1, 1] - st[-2, 1])
-        v_corner_exit = float(np.sqrt(dx_exit**2 + dy_exit**2) / dt_exit)
-    else:
-        v_corner_exit = 0.0
-    v_corner_exit = float(np.clip(v_corner_exit, 0.0,
-                                  JLAP_ROBOT_PARAMS['path_vel_lim']))
+    v_corner_exit = float(max(0.0, res_corner_opt['v'][-1]))
     print()
     print("=" * 60)
     print(f"Step 2b: EulerJLAPCoverage - segment 3 "
-          f"(V_entry={v_corner_exit:.3f} -> 0)")
+          f"(V_entry={V_HANDOFF:.3f} [max const] -> 0)  "
+          f"(corner actual exit = {v_corner_exit:.3f} m/s)")
     print("=" * 60)
     res_s2 = _run_jlap_seg(arc_exit.tolist(), WP_END,
                             initial_vel=v_corner_exit, final_vel=0.0)
     print(f"  Segment 3: T = {res_s2['time'][-1]:.3f} s   "
           f"v_peak = {np.max(res_s2['v']):.3f} m/s   "
-          f"v_entry = {v_corner_exit:.3f} m/s")
+          f"v_entry = {V_HANDOFF:.3f} m/s")
+
+    # ------------------------------------------------------------------
+    # CSV export
+    # ------------------------------------------------------------------
+    _export_csv(res_s1, res_s2, res_corner_opt)
 
     # ------------------------------------------------------------------
     # Figures
@@ -225,7 +213,8 @@ def main():
     _fig2_jlap_profiles(res_s1, res_s2)
     _fig3_we_sweep(sweep)
     _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
-                          mA, mB, res_s1, res_s2, opt_we)
+                          mA, mB, res_s1, res_s2, opt_we, we_time_ref)
+    _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt)
 
     plt.show()
     plt.close('all')
@@ -315,9 +304,12 @@ def _build_corner_waypoints(arc_entry, arc_exit):
     ]
 
 
-def _solve_corner(corner_wps, w_energy, warm_start=None):
+def _solve_corner(corner_wps, w_energy, warm_start=None,
+                  v_entry=V_HANDOFF, v_exit=V_HANDOFF):
     """! Run BSplineEnergyCoverage for the corner at a given w_energy.
 
+    @param v_entry<float>: Pinned entry speed [m/s] (default V_HANDOFF).
+    @param v_exit<float>:  Pinned exit speed  [m/s] (default V_HANDOFF).
     @return result dict from generate_trajectory().
     """
     return BSplineEnergyCoverage(
@@ -328,6 +320,8 @@ def _solve_corner(corner_wps, w_energy, warm_start=None):
         w_time=1.0,
         w_energy=float(w_energy),
         p_electronics=P_ELECTRONICS,
+        v_entry=v_entry,
+        v_exit=v_exit,
         **BSPLINE_COMMON,
     ).generate_trajectory(warm_start=warm_start)
 
@@ -362,7 +356,7 @@ def _corner_metrics(res):
     @return dict with scalar and array metrics.
     """
     P_tot  = _compute_corner_power(res)
-    energy = float(res.get('energy', np.trapezoid(P_tot, dx=0.01)))
+    energy = float(res.get('energy', np.trapz(P_tot, dx=0.01)))
     st     = res['states']
     plen   = float(np.sum(np.sqrt(np.diff(st[:, 0])**2
                                   + np.diff(st[:, 1])**2)))
@@ -376,6 +370,36 @@ def _corner_metrics(res):
         'P_total':          P_tot,
         'time_ik':          res['time_ik'],
     }
+
+
+def _compute_wheel_kinematics(res, l, r, dt):
+    """Compute per-wheel angular velocity, acceleration, and jerk.
+
+    @param res<dict>: Trajectory result dict (JLAP or B-spline).
+    @param l<float>: Half-wheelbase [m].
+    @param r<float>: Wheel radius [m].
+    @param dt<float>: Sampling interval for numerical differentiation [s].
+    @return dict with keys: time, omega_r, omega_l, alpha_r, alpha_l, jerk_r, jerk_l.
+    """
+    t = res.get('time_ik', res['time'])
+    v, omega = res['v'], res['omega']
+
+    omega_r = (v + l * omega) / r
+    omega_l = (v - l * omega) / r
+
+    if 'acc_path' in res and 'alpha' in res:
+        alpha_r = (res['acc_path'] + l * res['alpha']) / r
+        alpha_l = (res['acc_path'] - l * res['alpha']) / r
+    else:
+        alpha_r = np.gradient(omega_r, dt)
+        alpha_l = np.gradient(omega_l, dt)
+
+    jerk_r = np.gradient(alpha_r, dt)
+    jerk_l = np.gradient(alpha_l, dt)
+
+    return dict(time=t, omega_r=omega_r, omega_l=omega_l,
+                alpha_r=alpha_r, alpha_l=alpha_l,
+                jerk_r=jerk_r, jerk_l=jerk_l)
 
 
 def _sweep_we(corner_wps):
@@ -408,7 +432,7 @@ def _sweep_we(corner_wps):
             P_tot  = _compute_corner_power(res)
             T_tot  = float(res['time'][-1])
             peak_p = float(np.max(P_tot))
-            energy = float(res.get('energy', np.trapezoid(P_tot, dx=0.01)))
+            energy = float(res.get('energy', np.trapz(P_tot, dx=0.01)))
             if not (np.isfinite(peak_p) and np.isfinite(energy)):
                 raise ValueError("non-finite result")
             prev_res = res
@@ -421,6 +445,12 @@ def _sweep_we(corner_wps):
         except Exception as exc:
             print(f"  {w_e:>10.6f}  skipped ({exc})")
             prev_res = None   # reset warm-start on failure
+
+    if len(peak_powers) < 2:
+        raise RuntimeError(
+            f"Sweep produced {len(peak_powers)} feasible result(s); need at least 2 "
+            "to select an optimal w_e. Check IPOPT output above for convergence failures."
+        )
 
     # Sort by ascending w_e for gradient analysis and plotting.
     sort_idx       = np.argsort(we_valid)
@@ -445,6 +475,16 @@ def _sweep_we(corner_wps):
         opt_idx = 1
     opt_we  = float(we_values[opt_idx])
 
+    # Time reference: the sweep result with the shortest mission time.
+    # w_e=0.0 is the pure time-optimal formulation but its flat Hessian causes
+    # LBFGS to sometimes converge to a suboptimal local minimum.  Using the
+    # sweep minimum is always a valid (and often tighter) time reference.
+    time_ref_idx = int(np.argmin(mission_times))
+    we_time_ref  = float(we_values[time_ref_idx])
+    if we_time_ref != 0.0:
+        print(f"  NOTE: w_e=0.0 did not yield minimum time in sweep; "
+              f"using w_e={we_time_ref:.4f} as time reference.")
+
     print()
     print(f"  Optimal w_e = {opt_we:.6f}   "
           f"(d2(P_peak)/d(w_e)2 = {d2[opt_idx]:.4f})")
@@ -460,6 +500,8 @@ def _sweep_we(corner_wps):
         'd2_pp':          d2,
         'opt_idx':        opt_idx,
         'opt_we':         opt_we,
+        'we_time_ref':    we_time_ref,    # w_e giving minimum mission time
+        'time_ref_idx':   time_ref_idx,
         'res_by_we':      res_by_we,      # cached trajectory results
     }
 
@@ -467,7 +509,7 @@ def _sweep_we(corner_wps):
 # =============================================================================
 # TEXT OUTPUT
 # =============================================================================
-def _print_corner_comparison(mA, mB, opt_we):
+def _print_corner_comparison(mA, mB, opt_we, we_time_ref=0.0):
     rows = [
         ('Total time',    's',   'total_time'),
         ('Path length',   'm',   'path_length'),
@@ -477,12 +519,13 @@ def _print_corner_comparison(mA, mB, opt_we):
         ('Avg power',     'W',   'avg_power'),
     ]
     print()
-    print("  Corner: time-optimal vs energy-optimal")
+    print("  Corner: time reference vs energy-optimal")
+    t_col = f'Time-ref (w_e={we_time_ref:.4f})'
     w_col = f'Opt (w_e={opt_we:.4f})'
     hdr = (f"  {'Metric':<20} {'Unit':<6} "
-           f"{'Time-opt':>10}  {w_col:>18}  {'Delta%':>7}")
+           f"{t_col:>22}  {w_col:>18}  {'Delta%':>7}")
     print(hdr)
-    print("  " + "─" * 65)
+    print("  " + "─" * 78)
     for label, unit, key in rows:
         a, b = mA[key], mB[key]
         if abs(a) > 1e-12:
@@ -490,7 +533,7 @@ def _print_corner_comparison(mA, mB, opt_we):
             ds = f"{'+'if d>=0 else ''}{d:.1f}%"
         else:
             ds = 'n/a'
-        print(f"  {label:<20} {unit:<6} {a:>10.4f}  {b:>18.4f}  {ds:>7}")
+        print(f"  {label:<20} {unit:<6} {a:>22.4f}  {b:>18.4f}  {ds:>7}")
     print()
 
 
@@ -638,7 +681,7 @@ def _fig3_we_sweep(sweep):
 # FIGURE 4 - Corner detail + full stitched trajectory
 # =============================================================================
 def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
-                           mA, mB, res_s1, res_s2, opt_we):
+                           mA, mB, res_s1, res_s2, opt_we, we_time_ref=0.0):
     """! Corner comparison (XY + power) and full stitched path + velocity."""
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 10),
@@ -662,10 +705,10 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
     ax.plot(cwps[:, 0], cwps[:, 1], 'o--', color=COL_REF, markersize=7,
             linewidth=1.0, label='Corner waypoints', zorder=3)
 
-    # Time-optimal
+    # Time reference
     st_A = res_corner_time['states']
     ax.plot(st_A[:, 0], st_A[:, 1], '-', color=COL_S1, linewidth=2.0,
-            label='Time-optimal  (w_e = 0)', zorder=4)
+            label=f'Time-ref  (w_e={we_time_ref:.4f})', zorder=4)
 
     # Energy-optimal
     st_B = res_corner_opt['states']
@@ -677,15 +720,15 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.set_title('Corner B-spline: time-opt vs energy-opt', fontsize=9)
+    ax.set_title('Corner B-spline: time-ref vs energy-opt', fontsize=9)
     ax.legend(fontsize=8)
     ax.grid(True)
 
     # ------------------------------------------------------------------ [0,1]
-    # Corner power P(t): time-optimal vs energy-optimal
+    # Corner power P(t): time reference vs energy-optimal
     ax = axes[0, 1]
     ax.plot(mA['time_ik'], mA['P_total'], '-', color=COL_S1, linewidth=1.8,
-            label=f"Time-opt   peak={mA['peak_power']:.1f} W")
+            label=f"Time-ref (w_e={we_time_ref:.4f})  peak={mA['peak_power']:.1f} W")
     ax.plot(mB['time_ik'], mB['P_total'], '-', color=COL_OPT, linewidth=1.8,
             label=f"Energy-opt  peak={mB['peak_power']:.1f} W")
     ax.axhline(P_ELECTRONICS, color=COL_REF, linestyle=':', linewidth=1.0,
@@ -734,9 +777,14 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
     T1 = float(res_s1['time'][-1])
     Tc = float(res_corner_opt['time'][-1])
 
+    v_c_entry = float(res_s1['v'][-1])
+    v_c_exit  = float(max(0.0, res_corner_opt['v'][-1]))
+    corner_t = np.concatenate([[0.0], res_corner_opt['time_ik'], [Tc]])
+    corner_v = np.concatenate([[v_c_entry], res_corner_opt['v'], [v_c_exit]])
+
     ax.plot(res_s1['time'], res_s1['v'],
             '-', color=COL_S1, linewidth=1.8, label='Segment 1 (JLAP)')
-    ax.plot(res_corner_opt['time_ik'] + T1, res_corner_opt['v'],
+    ax.plot(corner_t + T1, corner_v,
             '-', color=COL_C, linewidth=1.8, label='Corner (B-spline)')
     ax.plot(res_s2['time'] + T1 + Tc, res_s2['v'],
             '-', color=COL_S2, linewidth=1.8, label='Segment 2 (JLAP)')
@@ -751,6 +799,155 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
     ax.grid(True)
 
     fig.tight_layout()
+
+
+# =============================================================================
+# FIGURE 5 - Per-wheel kinematics
+# =============================================================================
+def _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt):
+    """! Per-wheel angular velocity, acceleration, and jerk for all three segments."""
+    l_jlap = 0.5 * JLAP_ROBOT_PARAMS['robot_width']
+    r_jlap = JLAP_ROBOT_PARAMS['wheel_radius']
+    l_bs   = ROBOT_PARAMS_BSPLINE['l']
+    r_bs   = ROBOT_PARAMS_BSPLINE['r']
+
+    wk_s1 = _compute_wheel_kinematics(res_s1,         l_jlap, r_jlap, JLAP_DT)
+    wk_c  = _compute_wheel_kinematics(res_corner_opt, l_bs,   r_bs,   0.01)
+    wk_s2 = _compute_wheel_kinematics(res_s2,         l_jlap, r_jlap, JLAP_DT)
+
+    fig, axes = plt.subplots(3, 3, figsize=(14, 9), sharex='col',
+                             num='Figure 5 - Per-Wheel Kinematics')
+    fig.suptitle('Figure 5 - Per-Wheel Angular Velocity / Acceleration / Jerk',
+                 fontsize=12)
+
+    segments = [
+        (wk_s1, COL_S1, 'Segment 1 (JLAP)'),
+        (wk_c,  COL_C,  'Corner (B-spline opt)'),
+        (wk_s2, COL_S2, 'Segment 2 (JLAP)'),
+    ]
+    row_keys    = [('omega_r', 'omega_l'), ('alpha_r', 'alpha_l'), ('jerk_r', 'jerk_l')]
+    row_ylabels = ['ω_wheel [rad/s]', 'α_wheel [rad/s²]', 'jerk [rad/s³]']
+
+    for col, (wk, color, title) in enumerate(segments):
+        for row, ((kr, kl), ylabel) in enumerate(zip(row_keys, row_ylabels)):
+            ax = axes[row, col]
+            ax.plot(wk['time'], wk[kr], '-',  color=color, linewidth=1.8, label='Right')
+            ax.plot(wk['time'], wk[kl], '--', color=color, linewidth=1.8,
+                    label='Left', alpha=0.75)
+            ax.set_ylabel(ylabel)
+            if row == 0:
+                ax.set_title(title, fontsize=9)
+            if row == 2:
+                ax.set_xlabel('time [s]')
+            ax.legend(fontsize=7)
+            ax.grid(True)
+
+    fig.tight_layout()
+
+
+# =============================================================================
+# CSV EXPORT
+# =============================================================================
+def _export_csv(res_s1, res_s2, res_corner_opt,
+                out_dir=None):
+    """! Write per-segment and stitched trajectory CSV files.
+
+    Files written:
+      segment1_jlap.csv    -- straight segment 1 (JLAP)
+      corner_bspline.csv   -- corner B-spline (energy-optimal)
+      segment2_jlap.csv    -- straight segment 2 (JLAP)
+      trajectory_stitched.csv -- all three on a single time axis
+
+    Columns for JLAP segments:
+        time, x, y, theta, v, acc_path, omega, alpha, omega_r, omega_l
+
+    Columns for corner:
+        time, x, y, theta, v, omega, omega_r, omega_l, power
+
+    Columns for stitched:
+        time, x, y, theta, v, omega, omega_r, omega_l, segment
+        (segment: 1=seg1, 2=corner, 3=seg2)
+    """
+    if out_dir is None:
+        out_dir = os.path.join(os.path.dirname(__file__), 'csv_output')
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _save(fname, header, arrays):
+        path = os.path.join(out_dir, fname)
+        data = np.column_stack(arrays)
+        np.savetxt(path, data, delimiter=',',
+                   header=','.join(header), comments='', fmt='%.8f')
+        print(f"  Saved {fname}  ({data.shape[0]} rows x {data.shape[1]} cols)")
+
+    print()
+    print("=" * 60)
+    print("CSV export")
+    print("=" * 60)
+
+    # ------------------------------------------------------------------
+    # Segment 1 - JLAP
+    # ------------------------------------------------------------------
+    s1 = res_s1['states']
+    _save('segment1_jlap.csv',
+          ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
+           'omega_r', 'omega_l'],
+          [res_s1['time'], s1[:, 0], s1[:, 1], s1[:, 2],
+           res_s1['v'], res_s1['acc_path'], res_s1['omega'], res_s1['alpha'],
+           res_s1['omega_r'], res_s1['omega_l']])
+
+    # ------------------------------------------------------------------
+    # Corner - B-spline (kinematic outputs are on time_ik, denser than OCP grid)
+    # ------------------------------------------------------------------
+    t_ik  = res_corner_opt['time_ik']
+    t_ocp = res_corner_opt['time']
+    sc    = res_corner_opt['states']
+    x_c   = np.interp(t_ik, t_ocp, sc[:, 0])
+    y_c   = np.interp(t_ik, t_ocp, sc[:, 1])
+    th_c  = np.interp(t_ik, t_ocp, sc[:, 2])
+    pwr_c = np.interp(t_ik, t_ocp, res_corner_opt['power'])
+
+    _save('corner_bspline.csv',
+          ['time', 'x', 'y', 'theta', 'v', 'omega', 'omega_r', 'omega_l', 'power'],
+          [t_ik, x_c, y_c, th_c,
+           res_corner_opt['v'], res_corner_opt['omega'],
+           res_corner_opt['omega_r'], res_corner_opt['omega_l'],
+           pwr_c])
+
+    # ------------------------------------------------------------------
+    # Segment 2 - JLAP
+    # ------------------------------------------------------------------
+    s2 = res_s2['states']
+    _save('segment2_jlap.csv',
+          ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
+           'omega_r', 'omega_l'],
+          [res_s2['time'], s2[:, 0], s2[:, 1], s2[:, 2],
+           res_s2['v'], res_s2['acc_path'], res_s2['omega'], res_s2['alpha'],
+           res_s2['omega_r'], res_s2['omega_l']])
+
+    # ------------------------------------------------------------------
+    # Stitched - continuous time axis across all three segments
+    # ------------------------------------------------------------------
+    T1 = float(res_s1['time'][-1])
+    Tc = float(t_ocp[-1])
+
+    seg_id = np.concatenate([
+        np.ones(len(res_s1['time'])),
+        np.full(len(t_ik), 2),
+        np.full(len(res_s2['time']), 3),
+    ])
+    _save('trajectory_stitched.csv',
+          ['time', 'x', 'y', 'theta', 'v', 'omega', 'omega_r', 'omega_l', 'segment'],
+          [np.concatenate([res_s1['time'], t_ik + T1, res_s2['time'] + T1 + Tc]),
+           np.concatenate([s1[:, 0], x_c, s2[:, 0]]),
+           np.concatenate([s1[:, 1], y_c, s2[:, 1]]),
+           np.concatenate([s1[:, 2], th_c, s2[:, 2]]),
+           np.concatenate([res_s1['v'],       res_corner_opt['v'],       res_s2['v']]),
+           np.concatenate([res_s1['omega'],    res_corner_opt['omega'],   res_s2['omega']]),
+           np.concatenate([res_s1['omega_r'],  res_corner_opt['omega_r'], res_s2['omega_r']]),
+           np.concatenate([res_s1['omega_l'],  res_corner_opt['omega_l'], res_s2['omega_l']]),
+           seg_id])
+
+    print(f"  Output directory: {out_dir}")
 
 
 # =============================================================================
