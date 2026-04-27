@@ -86,12 +86,14 @@ V_HANDOFF = JLAP_ROBOT_PARAMS['path_vel_lim']   # 0.5 m/s
 # mid-arc where omega_max=0.196 rad/s limits speed to ~0.196 m/s on a 1 m arc.
 BSPLINE_COMMON = dict(
     bound=0.25,
-    n_ctrl_pts=4,
+    n_ctrl_pts=6,
     spline_order=3,
-    n_sampling=15,
+    n_sampling=20,
     vel_max=[V_HANDOFF, V_HANDOFF, 0.196],
     vel_min_lin=0.01,
     eps_nonh=0.005,
+    omega_entry=0.0,
+    omega_exit=0.0,
 )
 ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.3}
 
@@ -305,11 +307,17 @@ def _build_corner_waypoints(arc_entry, arc_exit):
 
 
 def _solve_corner(corner_wps, w_energy, warm_start=None,
-                  v_entry=V_HANDOFF, v_exit=V_HANDOFF):
+                  v_entry=V_HANDOFF, v_exit=V_HANDOFF,
+                  a_entry=0.0, a_exit=0.0,
+                  alpha_entry=0.0, alpha_exit=0.0):
     """! Run BSplineEnergyCoverage for the corner at a given w_energy.
 
     @param v_entry<float>: Pinned entry speed [m/s] (default V_HANDOFF).
     @param v_exit<float>:  Pinned exit speed  [m/s] (default V_HANDOFF).
+    @param a_entry<float>: Pinned entry forward acceleration [m/s²] (default 0).
+    @param a_exit<float>:  Pinned exit  forward acceleration [m/s²] (default 0).
+    @param alpha_entry<float>: Pinned entry angular acceleration [rad/s²] (default 0).
+    @param alpha_exit<float>:  Pinned exit  angular acceleration [rad/s²] (default 0).
     @return result dict from generate_trajectory().
     """
     return BSplineEnergyCoverage(
@@ -322,6 +330,10 @@ def _solve_corner(corner_wps, w_energy, warm_start=None,
         p_electronics=P_ELECTRONICS,
         v_entry=v_entry,
         v_exit=v_exit,
+        a_entry=a_entry,
+        a_exit=a_exit,
+        alpha_entry=alpha_entry,
+        alpha_exit=alpha_exit,
         **BSPLINE_COMMON,
     ).generate_trajectory(warm_start=warm_start)
 
@@ -458,6 +470,24 @@ def _sweep_we(corner_wps):
     total_energies = np.array(total_energies)[sort_idx]
     mission_times  = np.array(mission_times)[sort_idx]
     we_values      = np.array(we_valid)[sort_idx]
+
+    # Drop non-converged outliers: IPOPT can return finite but garbage values
+    # when hitting max_iter (mission time inflates by 10×+). Filter by median.
+    if len(mission_times) >= 3:
+        t_med  = np.median(mission_times)
+        valid  = mission_times <= 5.0 * t_med
+        if valid.sum() < len(mission_times):
+            n_drop = (~valid).sum()
+            print(f"  NOTE: dropping {n_drop} non-converged sweep point(s) "
+                  f"(mission time > 5× median={t_med:.2f} s).")
+            peak_powers    = peak_powers[valid]
+            total_energies = total_energies[valid]
+            mission_times  = mission_times[valid]
+            we_values      = we_values[valid]
+            # Purge from cache too so main() doesn't try to use them.
+            for w_e in list(res_by_we):
+                if w_e not in we_values:
+                    del res_by_we[w_e]
 
     d1 = np.gradient(peak_powers, we_values)
     d2 = np.gradient(d1, we_values)
@@ -778,9 +808,10 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
     Tc = float(res_corner_opt['time'][-1])
 
     v_c_entry = float(res_s1['v'][-1])
-    v_c_exit  = float(max(0.0, res_corner_opt['v'][-1]))
-    corner_t = np.concatenate([[0.0], res_corner_opt['time_ik'], [Tc]])
-    corner_v = np.concatenate([[v_c_entry], res_corner_opt['v'], [v_c_exit]])
+    # time_ik already ends at Tc (OCP endpoint) after the library fix, so no
+    # need to append Tc separately — doing so would create a duplicate timestamp.
+    corner_t = np.concatenate([[0.0], res_corner_opt['time_ik']])
+    corner_v = np.concatenate([[v_c_entry], res_corner_opt['v']])
 
     ax.plot(res_s1['time'], res_s1['v'],
             '-', color=COL_S1, linewidth=1.8, label='Segment 1 (JLAP)')
@@ -806,14 +837,12 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
 # =============================================================================
 def _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt):
     """! Per-wheel angular velocity, acceleration, and jerk for all three segments."""
-    l_jlap = 0.5 * JLAP_ROBOT_PARAMS['robot_width']
-    r_jlap = JLAP_ROBOT_PARAMS['wheel_radius']
-    l_bs   = ROBOT_PARAMS_BSPLINE['l']
-    r_bs   = ROBOT_PARAMS_BSPLINE['r']
+    l_ref = ROBOT_PARAMS_BSPLINE['l']
+    r_ref = ROBOT_PARAMS_BSPLINE['r']
 
-    wk_s1 = _compute_wheel_kinematics(res_s1,         l_jlap, r_jlap, JLAP_DT)
-    wk_c  = _compute_wheel_kinematics(res_corner_opt, l_bs,   r_bs,   0.01)
-    wk_s2 = _compute_wheel_kinematics(res_s2,         l_jlap, r_jlap, JLAP_DT)
+    wk_s1 = _compute_wheel_kinematics(res_s1,         l_ref, r_ref, JLAP_DT)
+    wk_c  = _compute_wheel_kinematics(res_corner_opt, l_ref, r_ref, 0.01)
+    wk_s2 = _compute_wheel_kinematics(res_s2,         l_ref, r_ref, JLAP_DT)
 
     fig, axes = plt.subplots(3, 3, figsize=(14, 9), sharex='col',
                              num='Figure 5 - Per-Wheel Kinematics')
@@ -884,16 +913,25 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     print("CSV export")
     print("=" * 60)
 
+    # Unified wheel-kinematic parameters for output (r=0.3 m, l=0.265 m).
+    # JLAP internally uses its own wheel_radius for dynamics; we re-express the
+    # output omega_r/omega_l using the BSpline robot geometry so all three
+    # segments share the same scale in the stitched CSV.
+    l_ref = ROBOT_PARAMS_BSPLINE['l']
+    r_ref = ROBOT_PARAMS_BSPLINE['r']
+
     # ------------------------------------------------------------------
     # Segment 1 - JLAP
     # ------------------------------------------------------------------
     s1 = res_s1['states']
+    omr_s1 = (res_s1['v'] + l_ref * res_s1['omega']) / r_ref
+    oml_s1 = (res_s1['v'] - l_ref * res_s1['omega']) / r_ref
     _save('segment1_jlap.csv',
           ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
            'omega_r', 'omega_l'],
           [res_s1['time'], s1[:, 0], s1[:, 1], s1[:, 2],
            res_s1['v'], res_s1['acc_path'], res_s1['omega'], res_s1['alpha'],
-           res_s1['omega_r'], res_s1['omega_l']])
+           omr_s1, oml_s1])
 
     # ------------------------------------------------------------------
     # Corner - B-spline (kinematic outputs are on time_ik, denser than OCP grid)
@@ -917,12 +955,14 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     # Segment 2 - JLAP
     # ------------------------------------------------------------------
     s2 = res_s2['states']
+    omr_s2 = (res_s2['v'] + l_ref * res_s2['omega']) / r_ref
+    oml_s2 = (res_s2['v'] - l_ref * res_s2['omega']) / r_ref
     _save('segment2_jlap.csv',
           ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
            'omega_r', 'omega_l'],
           [res_s2['time'], s2[:, 0], s2[:, 1], s2[:, 2],
            res_s2['v'], res_s2['acc_path'], res_s2['omega'], res_s2['alpha'],
-           res_s2['omega_r'], res_s2['omega_l']])
+           omr_s2, oml_s2])
 
     # ------------------------------------------------------------------
     # Stitched - continuous time axis across all three segments
@@ -930,21 +970,24 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     T1 = float(res_s1['time'][-1])
     Tc = float(t_ocp[-1])
 
+    # Corner endpoint (time_ik[-1] == Tc) has omega=0 by constraint; include it.
+    # S2 sample[0] is at t=0 → offset to T1+Tc, which duplicates the corner
+    # endpoint timestamp.  Drop S2's first sample to avoid the duplicate.
     seg_id = np.concatenate([
         np.ones(len(res_s1['time'])),
         np.full(len(t_ik), 2),
-        np.full(len(res_s2['time']), 3),
+        np.full(len(res_s2['time']) - 1, 3),
     ])
     _save('trajectory_stitched.csv',
           ['time', 'x', 'y', 'theta', 'v', 'omega', 'omega_r', 'omega_l', 'segment'],
-          [np.concatenate([res_s1['time'], t_ik + T1, res_s2['time'] + T1 + Tc]),
-           np.concatenate([s1[:, 0], x_c, s2[:, 0]]),
-           np.concatenate([s1[:, 1], y_c, s2[:, 1]]),
-           np.concatenate([s1[:, 2], th_c, s2[:, 2]]),
-           np.concatenate([res_s1['v'],       res_corner_opt['v'],       res_s2['v']]),
-           np.concatenate([res_s1['omega'],    res_corner_opt['omega'],   res_s2['omega']]),
-           np.concatenate([res_s1['omega_r'],  res_corner_opt['omega_r'], res_s2['omega_r']]),
-           np.concatenate([res_s1['omega_l'],  res_corner_opt['omega_l'], res_s2['omega_l']]),
+          [np.concatenate([res_s1['time'], t_ik + T1, res_s2['time'][1:] + T1 + Tc]),
+           np.concatenate([s1[:, 0], x_c, s2[1:, 0]]),
+           np.concatenate([s1[:, 1], y_c, s2[1:, 1]]),
+           np.concatenate([s1[:, 2], th_c, s2[1:, 2]]),
+           np.concatenate([res_s1['v'],       res_corner_opt['v'],       res_s2['v'][1:]]),
+           np.concatenate([res_s1['omega'],    res_corner_opt['omega'],   res_s2['omega'][1:]]),
+           np.concatenate([omr_s1,             res_corner_opt['omega_r'], omr_s2[1:]]),
+           np.concatenate([oml_s1,             res_corner_opt['omega_l'], oml_s2[1:]]),
            seg_id])
 
     print(f"  Output directory: {out_dir}")

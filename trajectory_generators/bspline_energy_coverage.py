@@ -99,7 +99,10 @@ class BSplineEnergyCoverage(BSplineCoverage):
     # ==========================================================================
     def __init__(self, waypoints, bound=0.1, n_ctrl_pts=6, spline_order=3,
                  n_sampling=50, vel_max=None, vel_min_lin=0.01,
-                 eps_nonh=0.001, v_entry=None, v_exit=None, robot_params=None,
+                 eps_nonh=0.001, v_entry=None, v_exit=None,
+                 a_entry=None, a_exit=None,
+                 omega_entry=None, omega_exit=None,
+                 alpha_entry=None, alpha_exit=None, robot_params=None,
                  energy_coeffs_right=None, energy_coeffs_left=None,
                  w_time=1.0, w_energy=1.0, e_max=None, p_electronics=2.0):
         """! Constructor.
@@ -130,7 +133,9 @@ class BSplineEnergyCoverage(BSplineCoverage):
         """
         super().__init__(waypoints, bound, n_ctrl_pts, spline_order,
                          n_sampling, vel_max, vel_min_lin, eps_nonh,
-                         v_entry, v_exit)
+                         v_entry, v_exit, a_entry, a_exit,
+                         omega_entry, omega_exit,
+                         alpha_entry, alpha_exit)
 
         self._robot = {**self._DEFAULT_ROBOT_PARAMS, **(robot_params or {})}
         self._e_coeffs_right = list(
@@ -234,9 +239,14 @@ class BSplineEnergyCoverage(BSplineCoverage):
         om_ocp = ds_val[:, 2] / T_val
 
         ts_des   = 0.01
-        t_interp = np.arange(max(ts_des, t_real[0]), t_real[-1], ts_des)
-        v_arr    = _CubicSpline(t_real, v_ocp)(t_interp[:-1])
-        omega_arr = _CubicSpline(t_real, om_ocp)(t_interp[:-1])
+        t_inner  = np.arange(max(ts_des, t_real[0]), t_real[-1], ts_des)
+        # Append the exact OCP endpoint so that omega_exit / v_exit boundary
+        # constraints are reflected in the output arrays (not dropped by [:-1]).
+        t_interp = np.append(t_inner, t_real[-1])
+        cs_v     = _CubicSpline(t_real, v_ocp)
+        cs_om    = _CubicSpline(t_real, om_ocp)
+        v_arr    = cs_v(t_interp)
+        omega_arr = cs_om(t_interp)
 
         l, r = self._robot['l'], self._robot['r']
         omega_r_arr = (v_arr + l * omega_arr) / r
@@ -250,7 +260,7 @@ class BSplineEnergyCoverage(BSplineCoverage):
             'omega':    omega_arr,
             'omega_r':  omega_r_arr,
             'omega_l':  omega_l_arr,
-            'time_ik':  t_interp[:-1],
+            'time_ik':  t_interp,
             'power':    power_val,
             'energy':   energy_val,
         }

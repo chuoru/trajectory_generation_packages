@@ -36,7 +36,10 @@ class BSplineCoverage:
     # ==========================================================================
     def __init__(self, waypoints, bound=0.1, n_ctrl_pts=6, spline_order=3,
                  n_sampling=50, vel_max=None, vel_min_lin=0.01,
-                 eps_nonh=0.001, v_entry=None, v_exit=None):
+                 eps_nonh=0.001, v_entry=None, v_exit=None,
+                 a_entry=None, a_exit=None,
+                 omega_entry=None, omega_exit=None,
+                 alpha_entry=None, alpha_exit=None):
         """! Constructor.
         @param waypoints<list>: Via-points [[x, y, theta], ...]. At least 2.
         @param bound<float>: Half-width of the corridor around each segment [m].
@@ -78,6 +81,12 @@ class BSplineCoverage:
 
         self._v_entry = float(v_entry) if v_entry is not None else None
         self._v_exit  = float(v_exit)  if v_exit  is not None else None
+        self._a_entry = float(a_entry) if a_entry is not None else None
+        self._a_exit  = float(a_exit)  if a_exit  is not None else None
+        self._omega_entry = float(omega_entry) if omega_entry is not None else None
+        self._omega_exit  = float(omega_exit)  if omega_exit  is not None else None
+        self._alpha_entry = float(alpha_entry) if alpha_entry is not None else None
+        self._alpha_exit  = float(alpha_exit)  if alpha_exit  is not None else None
 
         self._optimizer = cs.Opti()
         self._optimizer.solver(
@@ -417,11 +426,41 @@ class BSplineCoverage:
         # than an equality so that IPOPT always has a feasible interior point.
         if self._v_entry is not None:
             opti.subject_to(fwd_0 >= self._v_entry * T[0])
-            opti.subject_to(fwd_0 <= self._v_entry * 1.05 * T[0])
+            opti.subject_to(fwd_0 <= self._v_entry * 1.01 * T[0])
 
         if self._v_exit is not None:
             opti.subject_to(fwd_n >= self._v_exit * T[-1])
-            opti.subject_to(fwd_n <= self._v_exit * 1.05 * T[-1])
+            opti.subject_to(fwd_n <= self._v_exit * 1.01 * T[-1])
+
+        # Pin boundary forward accelerations for smooth stitching with adjacent segments.
+        # When a_entry/a_exit = 0, this is a pure linear constraint (homogeneous in ctrl pts).
+        if self._a_entry is not None:
+            c0_ = float(np.cos(theta_0))
+            s0_ = float(np.sin(theta_0))
+            fwd_acc_0 = dds[0, 0] * c0_ + dds[0, 1] * s0_
+            opti.subject_to(fwd_acc_0 == self._a_entry * T[0]**2)
+
+        if self._a_exit is not None:
+            cn_ = float(np.cos(theta_n))
+            sn_ = float(np.sin(theta_n))
+            fwd_acc_n = dds[-1, 0] * cn_ + dds[-1, 1] * sn_
+            opti.subject_to(fwd_acc_n == self._a_exit * T[-1]**2)
+
+        # Pin angular velocity at entry/exit so that omega = 0 at the junction
+        # with straight JLAP segments (which always have zero yaw rate).
+        # ds[i, 2] = dtheta/dtau; dividing by T[i] gives physical omega [rad/s].
+        if self._omega_entry is not None:
+            opti.subject_to(ds[0, 2] == self._omega_entry * T[0])
+        if self._omega_exit is not None:
+            opti.subject_to(ds[-1, 2] == self._omega_exit * T[-1])
+
+        # Pin angular acceleration at entry/exit to eliminate the alpha spike that
+        # occurs when omega jumps away from zero immediately after the boundary.
+        # dds[i, 2] = d²theta/dtau²; dividing by T[i]² gives alpha [rad/s²].
+        if self._alpha_entry is not None:
+            opti.subject_to(dds[0, 2] == self._alpha_entry * T[0]**2)
+        if self._alpha_exit is not None:
+            opti.subject_to(dds[-1, 2] == self._alpha_exit * T[-1]**2)
 
     def _add_boundary_constraints(self, opti, px, py, pt):
         """! Pin start and end poses to the first and last waypoints."""
