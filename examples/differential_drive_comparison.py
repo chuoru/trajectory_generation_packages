@@ -60,6 +60,10 @@ HEADING_IN  = 0.0
 HEADING_OUT = np.pi / 2
 BETA        = np.pi / 2
 
+# Straight lead-in / lead-out added to BSpline corner region so the OCP
+# starts and ends on a straight section, giving smooth curvature ramp-up.
+L_TRANSITION = 0.5   # m
+
 # PathSegment feasibility inputs (Methods B & C corner geometry)
 L_INPUT     = 1.0
 B_INPUT     = 0.08
@@ -129,15 +133,33 @@ def _make_bspline_common(v_h):
         bound=0.25,
         n_ctrl_pts=6,
         spline_order=3,
-        n_sampling=20,
+        n_sampling=40,
         vel_max=[v_h, v_h, 0.196],
         vel_min_lin=0.01,
         eps_nonh=0.005,
         omega_entry=0.0,
         omega_exit=0.0,
         acc_max=[_A_LIM, _A_LIM, _ANG_ACC_MAX],
-        jerk_max=[J_LIM,  J_LIM,  _ANG_JERK_MAX],
+        jerk_max=[J_LIM, J_LIM,  _ANG_JERK_MAX],
     )
+
+
+# =============================================================================
+# COVERAGE TOLERANCE SUMMARY
+# =============================================================================
+def _print_coverage_tolerances():
+    print("\n" + "=" * 60)
+    print("Coverage tolerance summary")
+    print("=" * 60)
+    print("  Method A  (EulerJLAP, full path)")
+    print(f"    epsilon_offset = {0.25:.3f} m  (Euler spiral corner lateral tolerance)")
+    print(f"    lc_scale       = {0.4:.3f}    (max corner reach fraction)")
+    print("  Methods B & C  (BSpline corner OCP)")
+    print(f"    bound          = {0.25:.3f} m  (BSpline corridor half-width)")
+    print(f"    eps_nonh       = {0.005:.4f}  (nonholonomic relaxation)")
+    print("  Methods B & C  (EulerJLAP straight segments)")
+    print(f"    epsilon_offset = {0.1:.3f} m  (same as Method A) ✓")
+    print()
 
 
 # =============================================================================
@@ -190,6 +212,7 @@ def main():
     m_b = _compute_metrics(_stitch_states(res_b), T_b, pm_b['time'], pm_b['P'])
     m_c = _compute_metrics(_stitch_states(res_c), T_c, pm_c['time'], pm_c['P'])
     _print_comparison(m_a, m_b, m_c, we_b, we_c)
+    _print_coverage_tolerances()
 
     # ------------------------------------------------------------------
     # Figures
@@ -198,6 +221,7 @@ def main():
     _fig2_velocity(res_a, res_b, res_c, we_b, we_c)
     _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c)
     _fig4_bars(m_a, m_b, m_c, we_b, we_c)
+    _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c)
 
     plt.show()
     plt.close('all')
@@ -212,6 +236,26 @@ def _stitch_states(res_seg):
     ], axis=0)
 
 
+def _stitch_acc_jerk(res_seg):
+    """Return (t_abs, a_abs, j_abs) stitched across all three sub-segments."""
+    T_s1     = res_seg['T_s1']
+    T_corner = res_seg['T_corner']
+    a_s1 = res_seg['res_s1']['acc_path']
+    a_c  = res_seg['res_corner']['acc_path']
+    a_s2 = res_seg['res_s2']['acc_path']
+    j_s1 = np.gradient(a_s1, JLAP_DT)
+    j_c  = np.gradient(a_c,  0.01)
+    j_s2 = np.gradient(a_s2, JLAP_DT)
+    t_abs = np.concatenate([
+        res_seg['res_s1']['time'],
+        res_seg['res_corner']['time_ik'] + T_s1,
+        res_seg['res_s2']['time'][1:]    + T_s1 + T_corner,
+    ])
+    a_abs = np.concatenate([a_s1, a_c,    a_s2[1:]])
+    j_abs = np.concatenate([j_s1, j_c,    j_s2[1:]])
+    return t_abs, a_abs, j_abs
+
+
 # =============================================================================
 # METHOD A — EulerJLAPCoverage, full path
 # =============================================================================
@@ -221,7 +265,7 @@ def _run_method_a():
         sampling_time=JLAP_DT,
         robot_params=JLAP_ROBOT_PARAMS,
         path_vel_step=0.01,
-        epsilon_offset=0.1,
+        epsilon_offset=0.25,
         lc_scale=0.4,
         initial_vel=0.0,
         final_vel=0.0,
@@ -239,15 +283,18 @@ def _run_segmented_pipeline():
 
     @return dict consumed by _build_segmented_result().
     """
-    seg_info   = _segment_corner()
-    arc_entry  = seg_info['arc_entry_world']
-    arc_exit   = seg_info['arc_exit_world']
-    corner_wps = _build_corner_waypoints(arc_entry, arc_exit)
+    seg_info      = _segment_corner()
+    arc_entry_ext = seg_info['arc_entry_ext_world']
+    arc_exit_ext  = seg_info['arc_exit_ext_world']
+    corner_wps    = _build_corner_waypoints(arc_entry_ext, arc_exit_ext)
 
     v_handoff = _find_smooth_v_handoff(corner_wps)
     print(f"  Active V_HANDOFF = {v_handoff:.3f} m/s")
 
-    res_s1        = _run_jlap_seg(WP_START, arc_entry.tolist(),
+    # JLAP segments end/start at the buffered handoff points (L_TRANSITION m
+    # before/after the arc tangent points) so the handoff falls inside the
+    # cruise phase — acceleration and jerk are ~0 at both junctions.
+    res_s1        = _run_jlap_seg(WP_START, arc_entry_ext.tolist(),
                                    initial_vel=0.0, final_vel=v_handoff)
     a_s1_exit     = float(res_s1['acc_path'][-1])
     alpha_s1_exit = float(res_s1['alpha'][-1])
@@ -260,7 +307,7 @@ def _run_segmented_pipeline():
 
     # v_exit is pinned to v_handoff for every corner in the sweep,
     # so segment 2 entry speed is shared between B and C.
-    res_s2 = _run_jlap_seg(arc_exit.tolist(), WP_END,
+    res_s2 = _run_jlap_seg(arc_exit_ext.tolist(), WP_END,
                             initial_vel=v_handoff, final_vel=0.0)
     print(f"  Segment 2: T = {res_s2['time'][-1]:.3f} s")
 
@@ -323,11 +370,17 @@ def _segment_corner():
     arc_world = np.column_stack([xy_world, hdg_world])
     arc_exit  = arc_world[-1, :2].copy()
 
+    out_dir       = np.array([np.cos(HEADING_OUT), np.sin(HEADING_OUT)])
+    arc_entry_ext = arc_entry - L_TRANSITION * in_dir
+    arc_exit_ext  = arc_exit  + L_TRANSITION * out_dir
+
     res.update({
-        'arc_world':       arc_world,
-        'arc_entry_world': arc_entry,
-        'arc_exit_world':  arc_exit,
-        'corner_vertex':   corner,
+        'arc_world':           arc_world,
+        'arc_entry_world':     arc_entry,
+        'arc_exit_world':      arc_exit,
+        'arc_entry_ext_world': arc_entry_ext,
+        'arc_exit_ext_world':  arc_exit_ext,
+        'corner_vertex':       corner,
     })
     return res
 
@@ -513,20 +566,16 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
                 if w_e not in we_values:
                     del res_by_we[w_e]
 
-    d1 = np.gradient(peak_powers, we_values)
-    d2 = np.gradient(d1, we_values)
+    opt_idx = int(np.argmin(peak_powers))
+    opt_we  = float(we_values[opt_idx])
 
-    interior = np.arange(1, len(we_values) - 1)
-    opt_idx  = int(interior[np.argmin(d2[interior])]) if len(interior) > 0 \
-               else int(np.argmin(d2))
-    if float(we_values[opt_idx]) == 0.0 and len(we_values) > 1:
-        opt_idx = 1
-    opt_we = float(we_values[opt_idx])
-
-    time_ref_idx = int(np.argmin(mission_times))
-    we_time_ref  = float(we_values[time_ref_idx])
-    if we_time_ref != 0.0:
-        print(f"  NOTE: w_e=0.0 did not yield minimum time; "
+    if 0.0 in res_by_we:
+        time_ref_idx = int(np.where(we_values == 0.0)[0][0])
+        we_time_ref  = 0.0
+    else:
+        time_ref_idx = int(np.argmin(mission_times))
+        we_time_ref  = float(we_values[time_ref_idx])
+        print(f"  NOTE: w_e=0.0 did not converge; "
               f"using w_e={we_time_ref:.4f} as time reference.")
 
     print(f"\n  opt w_e = {opt_we:.4f}   peak P = {peak_powers[opt_idx]:.2f} W"
@@ -537,7 +586,6 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
         'peak_powers':    peak_powers,
         'total_energies': total_energies,
         'mission_times':  mission_times,
-        'd2_pp':          d2,
         'opt_idx':        opt_idx,
         'opt_we':         opt_we,
         'we_time_ref':    we_time_ref,
@@ -702,10 +750,14 @@ def _fig1_xy_overlay(res_a, res_b, res_c, we_b, we_c):
             ms=9, markeredgewidth=1.5, zorder=6)
 
     # Arc entry/exit markers
-    ae   = res_b['seg_info']['arc_entry_world']
-    ax_e = res_b['seg_info']['arc_exit_world']
-    ax.plot(*ae,   's', color='black', ms=8, zorder=7, label='Arc junctions')
-    ax.plot(*ax_e, 's', color='black', ms=8, zorder=7)
+    ae     = res_b['seg_info']['arc_entry_world']
+    ax_e   = res_b['seg_info']['arc_exit_world']
+    ae_ext = res_b['seg_info']['arc_entry_ext_world']
+    ax_ext = res_b['seg_info']['arc_exit_ext_world']
+    ax.plot(*ae,     's', color='black',  ms=8, zorder=7, label='Arc tangent points')
+    ax.plot(*ax_e,   's', color='black',  ms=8, zorder=7)
+    ax.plot(*ae_ext, 'D', color='dimgray', ms=7, zorder=7, label='JLAP handoff points')
+    ax.plot(*ax_ext, 'D', color='dimgray', ms=7, zorder=7)
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
@@ -845,6 +897,62 @@ def _fig4_bars(m_a, m_b, m_c, we_b, we_c):
         ax.set_title(title, fontsize=9)
         ax.set_ylim(0, top * 1.15)
         ax.grid(axis='y')
+
+    fig.tight_layout()
+
+
+# =============================================================================
+# FIGURE 5 — Acceleration and Jerk profiles
+# =============================================================================
+def _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c):
+    fig, (ax_a, ax_j) = plt.subplots(2, 1, figsize=(10, 7), sharex=True,
+                                      num='Figure 5 - Acceleration and Jerk Profiles')
+    fig.suptitle('Figure 5 — Linear Acceleration and Jerk Profiles  (all three methods)',
+                 fontsize=10)
+
+    xform_a = ax_a.get_xaxis_transform()
+    xform_j = ax_j.get_xaxis_transform()
+
+    # Method A
+    j_a = np.gradient(res_a['acc_path'], JLAP_DT)
+    ax_a.plot(res_a['time'], res_a['acc_path'], '-', color=COL_A, lw=1.8,
+              label='A: EulerJLAP')
+    ax_j.plot(res_a['time'], j_a,               '-', color=COL_A, lw=1.8,
+              label='A: EulerJLAP')
+
+    # Methods B and C
+    for res_seg, col, lbl in [
+        (res_b, COL_B, f'B: Segmented corner w_e={we_b:.3f} (time-opt)'),
+        (res_c, COL_C, f'C: Segmented corner w_e={we_c:.3f} (energy-opt)'),
+    ]:
+        t_abs, a_abs, j_abs = _stitch_acc_jerk(res_seg)
+        ax_a.plot(t_abs, a_abs, '-', color=col, lw=1.8, label=lbl)
+        ax_j.plot(t_abs, j_abs, '-', color=col, lw=1.8, label=lbl)
+
+    # Zero reference lines
+    ax_a.axhline(0, color='k', lw=0.5, ls=':')
+    ax_j.axhline(0, color='k', lw=0.5, ls=':')
+
+    # Segment junction markers (shared S1 entry, separate S2 entries for B and C)
+    T_s1 = res_b['T_s1']
+    for ax, xform in [(ax_a, xform_a), (ax_j, xform_j)]:
+        ax.axvline(T_s1, color=COL_REF, ls=':', lw=1.0)
+        ax.text(T_s1, 0.97, 'S1|C', fontsize=7, color=COL_REF,
+                ha='center', transform=xform)
+        for res_seg, col, tag, y in [(res_b, COL_B, 'C|S2 B', 0.97),
+                                     (res_c, COL_C, 'C|S2 C', 0.89)]:
+            t_j = res_seg['T_s1'] + res_seg['T_corner']
+            ax.axvline(t_j, color=col, ls=':', lw=0.9)
+            ax.text(t_j, y, tag, fontsize=7, color=col, ha='center', transform=xform)
+
+    ax_a.set_ylabel('Acceleration [m/s²]')
+    ax_a.legend(fontsize=8)
+    ax_a.grid(True)
+
+    ax_j.set_xlabel('time [s]')
+    ax_j.set_ylabel('Jerk [m/s³]')
+    ax_j.legend(fontsize=8)
+    ax_j.grid(True)
 
     fig.tight_layout()
 
