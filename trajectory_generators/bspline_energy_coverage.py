@@ -42,6 +42,7 @@ import numpy as np
 # External library
 import casadi as cs
 from scipy.interpolate import CubicSpline as _CubicSpline
+from scipy.interpolate import PchipInterpolator as _Pchip
 
 # Internal library
 from .bspline_coverage import BSplineCoverage
@@ -104,7 +105,8 @@ class BSplineEnergyCoverage(BSplineCoverage):
                  omega_entry=None, omega_exit=None,
                  alpha_entry=None, alpha_exit=None, robot_params=None,
                  energy_coeffs_right=None, energy_coeffs_left=None,
-                 w_time=1.0, w_energy=1.0, e_max=None, p_electronics=2.0):
+                 w_time=1.0, w_energy=1.0, e_max=None, p_electronics=2.0,
+                 acc_max=None, jerk_max=None):
         """! Constructor.
 
         All parameters of BSplineCoverage are accepted unchanged.
@@ -130,12 +132,17 @@ class BSplineEnergyCoverage(BSplineCoverage):
         @param w_energy<float>: Weight on total energy consumption.
         @param e_max<float|None>: Hard upper bound on energy [J]. None = none.
         @param p_electronics<float>: Constant hotel load (sensors, computer) [W].
+        @param acc_max<list|None>: [ax_max, ay_max, alpha_max] physical acceleration
+            limits [m/s², m/s², rad/s²]. None keeps BSplineCoverage defaults.
+        @param jerk_max<list|None>: [jx_max, jy_max, jalpha_max] physical jerk
+            limits [m/s³, m/s³, rad/s³]. None keeps BSplineCoverage defaults.
         """
         super().__init__(waypoints, bound, n_ctrl_pts, spline_order,
                          n_sampling, vel_max, vel_min_lin, eps_nonh,
                          v_entry, v_exit, a_entry, a_exit,
                          omega_entry, omega_exit,
-                         alpha_entry, alpha_exit)
+                         alpha_entry, alpha_exit,
+                         acc_max, jerk_max)
 
         self._robot = {**self._DEFAULT_ROBOT_PARAMS, **(robot_params or {})}
         self._e_coeffs_right = list(
@@ -211,6 +218,27 @@ class BSplineEnergyCoverage(BSplineCoverage):
         self._add_boundary_constraints(opti, px, py, pt)
         self._add_corridor_constraints(opti, px, py)
 
+        # --- Wheel-level angular jerk constraints ----------------------------
+        # The Cartesian jerk constraints in _add_dynamic_constraints limit each
+        # coordinate independently. For a differential drive in a corner, the
+        # right / left wheel angular jerk combines both body and angular jerk:
+        #   jerk_{r,l} * r = d(acc_path)/dt ± l * d(alpha)/dt
+        # Bounding this directly ensures |jerk_{r,l}| ≤ J_LIM/r everywhere,
+        # which the independent Cartesian constraints do not guarantee.
+        jerk_whl = float(self._jerk_max[0])   # J_LIM [m/s³]
+        l_w = self._robot['l']
+        for i in range(self._nt):
+            Ti    = T[i]
+            cos_i = cs.cos(s[i, 2])
+            sin_i = cs.sin(s[i, 2])
+            body_j = cos_i * ddds[i, 0] + sin_i * ddds[i, 1]
+            ang_j  = l_w * ddds[i, 2]
+            lim    = jerk_whl * Ti**3
+            opti.subject_to(body_j + ang_j <= lim)
+            opti.subject_to(-lim <= body_j + ang_j)
+            opti.subject_to(body_j - ang_j <= lim)
+            opti.subject_to(-lim <= body_j - ang_j)
+
         # --- Optional hard energy-budget constraint --------------------------
         if self._e_max is not None:
             opti.subject_to(energy_sym <= self._e_max)
@@ -222,35 +250,65 @@ class BSplineEnergyCoverage(BSplineCoverage):
         except Exception:
             dbg = opti.debug
 
-        T_val     = dbg.value(T)
-        s_val     = dbg.value(s)
-        ds_val    = np.array(dbg.value(ds))
-        ctrl_pts  = dbg.value(P_ctrl)
-        power_val = np.array(dbg.value(power_sym)).flatten()
+        T_val      = dbg.value(T)
+        s_val      = dbg.value(s)
+        ds_val     = np.array(dbg.value(ds))
+        dds_val    = np.array(dbg.value(dds))
+        ddds_val   = np.array(dbg.value(ddds))
+        ctrl_pts   = dbg.value(P_ctrl)
+        power_val  = np.array(dbg.value(power_sym)).flatten()
         energy_val = float(dbg.value(energy_sym))
 
         # Real time axis: t[i] = cumsum(T)[i] / nt
         t_real = np.cumsum(T_val) / self._nt
 
-        # Velocity at OCP nodes from B-spline derivatives (smooth, no staircase)
+        # Velocity and angular velocity at OCP nodes from B-spline derivatives
         cos_th = np.cos(s_val[:, 2])
         sin_th = np.sin(s_val[:, 2])
         v_ocp  = (cos_th * ds_val[:, 0] + sin_th * ds_val[:, 1]) / T_val
         om_ocp = ds_val[:, 2] / T_val
+
+        # Physical forward and angular acceleration at OCP nodes, derived from
+        # the B-spline 2nd derivative.  These pass through the exact OCP-node
+        # values (including the pinned a_entry / alpha_entry boundary values),
+        # so interpolating them directly avoids the boundary mismatch that
+        # occurs when using the CubicSpline 1st derivative for v/omega.
+        a_ocp     = (cos_th * dds_val[:, 0] + sin_th * dds_val[:, 1]) / T_val**2
+        alpha_ocp = dds_val[:, 2] / T_val**2
 
         ts_des   = 0.01
         t_inner  = np.arange(max(ts_des, t_real[0]), t_real[-1], ts_des)
         # Append the exact OCP endpoint so that omega_exit / v_exit boundary
         # constraints are reflected in the output arrays (not dropped by [:-1]).
         t_interp = np.append(t_inner, t_real[-1])
-        cs_v     = _CubicSpline(t_real, v_ocp)
-        cs_om    = _CubicSpline(t_real, om_ocp)
-        v_arr    = cs_v(t_interp)
+        cs_v  = _CubicSpline(t_real, v_ocp)
+        cs_om = _CubicSpline(t_real, om_ocp)
+        v_arr     = cs_v(t_interp)
         omega_arr = cs_om(t_interp)
+        # acc_path / alpha are interpolated directly from the OCP-level analytical
+        # values (not from CubicSpline derivatives).  This eliminates the double
+        # np.gradient cascade (the original source of ±200-400 rad/s³ boundary
+        # spikes) while preserving the exact pinned boundary values from the OCP.
+        acc_path_arr = _CubicSpline(t_real, a_ocp)(t_interp)
+        # Pchip for alpha: monotone-preserving interpolation avoids the
+        # overshoot that a natural CubicSpline produces when alpha_ocp
+        # transitions from increasing to decreasing (e.g. when omega saturates).
+        alpha_arr    = _Pchip(t_real, alpha_ocp)(t_interp)
 
         l, r = self._robot['l'], self._robot['r']
         omega_r_arr = (v_arr + l * omega_arr) / r
         omega_l_arr = (v_arr - l * omega_arr) / r
+
+        # Wheel linear jerk [m/s³] directly from OCP 3rd B-spline derivatives.
+        # jerk_r = d(acc_path)/dt + l * d(alpha)/dt — this is exactly the
+        # quantity bounded by the OCP wheel-jerk constraint (≤ J_LIM in m/s³),
+        # so Pchip interpolation of these OCP-node values stays within ±J_LIM.
+        body_jerk_ocp = (cos_th * ddds_val[:, 0] + sin_th * ddds_val[:, 1]) / T_val**3
+        ang_jerk_ocp  = ddds_val[:, 2] / T_val**3
+        jerk_r_ocp    = body_jerk_ocp + l * ang_jerk_ocp   # m/s³, no /r
+        jerk_l_ocp    = body_jerk_ocp - l * ang_jerk_ocp   # m/s³, no /r
+        jerk_r_arr    = _Pchip(t_real, jerk_r_ocp)(t_interp)
+        jerk_l_arr    = _Pchip(t_real, jerk_l_ocp)(t_interp)
 
         return {
             'states':   s_val,
@@ -258,8 +316,12 @@ class BSplineEnergyCoverage(BSplineCoverage):
             'ctrl_pts': ctrl_pts,
             'v':        v_arr,
             'omega':    omega_arr,
-            'omega_r':  omega_r_arr,
+            'acc_path':   acc_path_arr,
+            'alpha':      alpha_arr,
+            'omega_r':    omega_r_arr,
             'omega_l':  omega_l_arr,
+            'jerk_r':   jerk_r_arr,
+            'jerk_l':   jerk_l_arr,
             'time_ik':  t_interp,
             'power':    power_val,
             'energy':   energy_val,

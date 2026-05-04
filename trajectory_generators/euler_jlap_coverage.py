@@ -534,14 +534,14 @@ class EulerJLAPCoverage:
                     zz    = z - (T_a + Tc + T1d)
                     pos_j = pos_1d + zz * vel_1d + 0.5 * acc_1d * zz**2
                     v_j   = np.linalg.norm(vel_1d + acc_1d * zz)
-                    a_j   = -a_pk
+                    a_j   = -self._j_lim * T1d
                 else:
                     zz    = z - (T_a + Tc + T1d + T2d)
                     pos_j = pos_2d + zz * vel_2d + 0.5 * acc_1d * zz**2 \
                             + (1.0/6) * self._j_lim * zz**3 * uv
                     v_j   = np.linalg.norm(vel_2d + acc_1d * zz
                                            + 0.5 * self._j_lim * zz**2 * uv)
-                    a_j   = -a_pk + self._j_lim * zz
+                    a_j   = self._j_lim * (zz - T1d)
 
                 _append(pos_j, phi_line, abs(v_j), abs(a_j), 0.0, 0.0, t_j)
 

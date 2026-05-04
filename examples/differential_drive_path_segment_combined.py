@@ -73,28 +73,48 @@ JLAP_ROBOT_PARAMS = {
 }
 JLAP_DT = 0.05   # [s]
 
+# Jerk limit derived from motor parameters -- mirrors EulerJLAPCoverage.__init__:102-104
+_j_rated_torque = JLAP_ROBOT_PARAMS['gear_ratio'] * JLAP_ROBOT_PARAMS['rated_motor_torque']
+_j_inertia      = JLAP_ROBOT_PARAMS['gear_ratio']**2 * JLAP_ROBOT_PARAMS['motor_inertia']
+_j_r            = JLAP_ROBOT_PARAMS['wheel_radius']
+_j_m            = JLAP_ROBOT_PARAMS['robot_mass']
+_A_LIM          = (0.5 * _j_rated_torque * _j_r
+                   / (0.25 * _j_m * _j_r**2 + _j_inertia))   # [m/s²]
+J_LIM = _A_LIM / (40.0 * JLAP_DT)                            # [m/s³]  ≈ 3.55
+
 # Handoff velocity: S1 exits at this speed; corner enters at this speed.
 # Taken from path_vel_lim so it is always within the JLAP kinematic limits.
-V_HANDOFF = JLAP_ROBOT_PARAMS['path_vel_lim']   # 0.5 m/s
+V_HANDOFF     = JLAP_ROBOT_PARAMS['path_vel_lim']   # 0.5 m/s
+V_HANDOFF_MIN = 0.10   # minimum fallback handoff velocity [m/s]
 
-# BSplineEnergyCoverage (corner)
-# Reduced n_ctrl_pts / n_sampling vs the full-path example so the NLP
-# stays tractable for the short corner segments (each ~1 m).
-# v_entry / v_exit are pinned to V_HANDOFF via explicit NLP constraints
-# (±5 % band) so the robot enters and exits the corner at cruise speed.
-# vel_min_lin is kept small (0.01) so the BSpline is free to slow through the
-# mid-arc where omega_max=0.196 rad/s limits speed to ~0.196 m/s on a 1 m arc.
-BSPLINE_COMMON = dict(
-    bound=0.25,
-    n_ctrl_pts=6,
-    spline_order=3,
-    n_sampling=20,
-    vel_max=[V_HANDOFF, V_HANDOFF, 0.196],
-    vel_min_lin=0.01,
-    eps_nonh=0.005,
-    omega_entry=0.0,
-    omega_exit=0.0,
-)
+# Angular acc/jerk limits derived from JLAP linear limits and wheelbase.
+_ANG_ACC_MAX  = _A_LIM / L_WHEELBASE   # [rad/s²]
+_ANG_JERK_MAX = J_LIM  / L_WHEELBASE   # [rad/s³]
+
+
+def _make_bspline_common(v_h):
+    """Return BSplineEnergyCoverage kwargs parameterised by handoff speed v_h.
+
+    acc_max / jerk_max are set to the same physical limits the JLAP segments
+    use so that the corner OCP cannot produce profiles with unrealistically
+    large acceleration or jerk.  vel_max[0] tracks v_h so the feedrate limit
+    stays consistent with the chosen handoff velocity.
+    """
+    return dict(
+        bound=0.25,
+        n_ctrl_pts=6,
+        spline_order=3,
+        n_sampling=20,
+        vel_max=[v_h, v_h, 0.196],
+        vel_min_lin=0.01,
+        eps_nonh=0.005,
+        omega_entry=0.0,
+        omega_exit=0.0,
+        acc_max= [_A_LIM, _A_LIM, _ANG_ACC_MAX],
+        jerk_max=[J_LIM,  J_LIM,  _ANG_JERK_MAX],
+    )
+
+
 ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.3}
 
 ENERGY_COEFFS_RIGHT = [
@@ -141,31 +161,47 @@ def main():
           f"b = {seg_info['b']:.4f} m")
     print(f"  arc entry : ({arc_entry[0]:.3f}, {arc_entry[1]:.3f})")
     print(f"  arc exit  : ({arc_exit[0]:.3f},  {arc_exit[1]:.3f})")
-    print(f"  handoff velocity : {V_HANDOFF:.3f} m/s")
+
+    corner_wps = _build_corner_waypoints(arc_entry, arc_exit)
 
     # ------------------------------------------------------------------
-    # Step 2a: EulerJLAP -- segment 1 (accelerates, exits at V_HANDOFF)
+    # Step 1b: Find the maximum handoff speed that keeps corner jerk ≤ J_LIM
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
-    print("Step 2a: EulerJLAPCoverage - segment 1 (0 -> V_HANDOFF)")
+    print("Step 1b: Adaptive V_HANDOFF search (corner jerk constraint)")
+    print("=" * 60)
+    v_handoff = _find_smooth_v_handoff(corner_wps)
+    print(f"  Active V_HANDOFF = {v_handoff:.3f} m/s")
+
+    # ------------------------------------------------------------------
+    # Step 2a: EulerJLAP -- segment 1 (accelerates, exits at v_handoff)
+    # ------------------------------------------------------------------
+    print()
+    print("=" * 60)
+    print(f"Step 2a: EulerJLAPCoverage - segment 1 (0 -> {v_handoff:.3f})")
     print("=" * 60)
     res_s1 = _run_jlap_seg(WP_START, arc_entry.tolist(),
-                            initial_vel=0.0, final_vel=V_HANDOFF)
+                            initial_vel=0.0, final_vel=v_handoff)
     print(f"  Segment 1: T = {res_s1['time'][-1]:.3f} s   "
           f"v_peak = {np.max(res_s1['v']):.3f} m/s   "
           f"v_exit = {res_s1['v'][-1]:.3f} m/s")
 
+    # Extract actual exit acceleration/alpha for tight boundary matching.
+    a_s1_exit     = float(res_s1['acc_path'][-1])
+    alpha_s1_exit = float(res_s1['alpha'][-1])
+
     # ------------------------------------------------------------------
     # Step 3: Corner B-spline -- sweep w_energy -> optimal
-    #         (entry speed pinned to V_HANDOFF)
+    #         Entry acceleration matched to actual S1 exit for C1 continuity.
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
     print("Step 3: BSplineEnergyCoverage - w_energy sweep for corner")
     print("=" * 60)
-    corner_wps = _build_corner_waypoints(arc_entry, arc_exit)
-    sweep = _sweep_we(corner_wps)
+    sweep = _sweep_we(corner_wps,
+                      a_entry=a_s1_exit, alpha_entry=alpha_s1_exit,
+                      v_handoff=v_handoff)
     opt_we      = sweep['opt_we']
     we_time_ref = sweep['we_time_ref']
     res_by_we   = sweep['res_by_we']
@@ -181,27 +217,30 @@ def main():
     else:
         print("  (sweep result missing -- re-solving warm)")
         res_corner_opt = _solve_corner(corner_wps, w_energy=opt_we,
-                                       warm_start=res_corner_time)
+                                       warm_start=res_corner_time,
+                                       v_entry=v_handoff, v_exit=v_handoff,
+                                       a_entry=a_s1_exit,
+                                       alpha_entry=alpha_s1_exit)
 
     mA = _corner_metrics(res_corner_time)
     mB = _corner_metrics(res_corner_opt)
     _print_corner_comparison(mA, mB, opt_we, we_time_ref)
 
     # ------------------------------------------------------------------
-    # Step 2b: EulerJLAP -- segment 3 (enters at corner exit speed)
+    # Step 2b: EulerJLAP -- segment 2 (enters at corner exit speed)
     # ------------------------------------------------------------------
     v_corner_exit = float(max(0.0, res_corner_opt['v'][-1]))
     print()
     print("=" * 60)
-    print(f"Step 2b: EulerJLAPCoverage - segment 3 "
-          f"(V_entry={V_HANDOFF:.3f} [max const] -> 0)  "
+    print(f"Step 2b: EulerJLAPCoverage - segment 2 "
+          f"(V_entry={v_handoff:.3f} -> 0)  "
           f"(corner actual exit = {v_corner_exit:.3f} m/s)")
     print("=" * 60)
     res_s2 = _run_jlap_seg(arc_exit.tolist(), WP_END,
                             initial_vel=v_corner_exit, final_vel=0.0)
-    print(f"  Segment 3: T = {res_s2['time'][-1]:.3f} s   "
+    print(f"  Segment 2: T = {res_s2['time'][-1]:.3f} s   "
           f"v_peak = {np.max(res_s2['v']):.3f} m/s   "
-          f"v_entry = {V_HANDOFF:.3f} m/s")
+          f"v_entry = {v_corner_exit:.3f} m/s")
 
     # ------------------------------------------------------------------
     # CSV export
@@ -307,19 +346,21 @@ def _build_corner_waypoints(arc_entry, arc_exit):
 
 
 def _solve_corner(corner_wps, w_energy, warm_start=None,
-                  v_entry=V_HANDOFF, v_exit=V_HANDOFF,
+                  v_entry=None, v_exit=None,
                   a_entry=0.0, a_exit=0.0,
                   alpha_entry=0.0, alpha_exit=0.0):
     """! Run BSplineEnergyCoverage for the corner at a given w_energy.
 
-    @param v_entry<float>: Pinned entry speed [m/s] (default V_HANDOFF).
-    @param v_exit<float>:  Pinned exit speed  [m/s] (default V_HANDOFF).
-    @param a_entry<float>: Pinned entry forward acceleration [m/s²] (default 0).
-    @param a_exit<float>:  Pinned exit  forward acceleration [m/s²] (default 0).
-    @param alpha_entry<float>: Pinned entry angular acceleration [rad/s²] (default 0).
-    @param alpha_exit<float>:  Pinned exit  angular acceleration [rad/s²] (default 0).
+    @param v_entry<float|None>: Pinned entry speed [m/s]. None → V_HANDOFF.
+    @param v_exit<float|None>:  Pinned exit speed  [m/s]. None → V_HANDOFF.
+    @param a_entry<float>: Pinned entry forward acceleration [m/s²].
+    @param a_exit<float>:  Pinned exit  forward acceleration [m/s²].
+    @param alpha_entry<float>: Pinned entry angular acceleration [rad/s²].
+    @param alpha_exit<float>:  Pinned exit  angular acceleration [rad/s²].
     @return result dict from generate_trajectory().
     """
+    v_entry = float(v_entry) if v_entry is not None else V_HANDOFF
+    v_exit  = float(v_exit)  if v_exit  is not None else V_HANDOFF
     return BSplineEnergyCoverage(
         waypoints=corner_wps,
         robot_params=ROBOT_PARAMS_BSPLINE,
@@ -334,7 +375,7 @@ def _solve_corner(corner_wps, w_energy, warm_start=None,
         a_exit=a_exit,
         alpha_entry=alpha_entry,
         alpha_exit=alpha_exit,
-        **BSPLINE_COMMON,
+        **_make_bspline_common(v_entry),
     ).generate_trajectory(warm_start=warm_start)
 
 
@@ -406,21 +447,33 @@ def _compute_wheel_kinematics(res, l, r, dt):
         alpha_r = np.gradient(omega_r, dt)
         alpha_l = np.gradient(omega_l, dt)
 
-    jerk_r = np.gradient(alpha_r, dt)
-    jerk_l = np.gradient(alpha_l, dt)
+    # jerk in m/s³: use OCP-level values if available (bspline), else np.gradient * r
+    if 'jerk_r' in res and 'jerk_l' in res:
+        jerk_r = res['jerk_r']   # already m/s³ from OCP ddds_val
+        jerk_l = res['jerk_l']
+    else:
+        jerk_r = np.gradient(alpha_r, dt) * r
+        jerk_l = np.gradient(alpha_l, dt) * r
 
     return dict(time=t, omega_r=omega_r, omega_l=omega_l,
                 alpha_r=alpha_r, alpha_l=alpha_l,
                 jerk_r=jerk_r, jerk_l=jerk_l)
 
 
-def _sweep_we(corner_wps):
+def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     """! Sweep w_energy in [0, 1e-3 ... 1] and identify optimal trade-off.
 
     Uses the minimum of d2(peak_power)/d(w_e)^2 as the optimal point.
 
+    @param a_entry<float>:     Forward acceleration at corner entry [m/s²].
+                               Pass the actual JLAP exit value for continuity.
+    @param alpha_entry<float>: Angular acceleration at corner entry [rad/s²].
+    @param v_handoff<float|None>: Entry/exit speed for the corner [m/s].
+                               None defaults to V_HANDOFF.
     @return dict with sweep arrays and opt_we.
     """
+    v_h = float(v_handoff) if v_handoff is not None else V_HANDOFF
+
     # Fixed sweep values, run HIGH to LOW so that w_e=0 (time-optimal) is
     # warm-started from w_e=0.005 and converges quickly.
     # Higher w_e values converge easily on their own (energy term helps LBFGS).
@@ -432,7 +485,7 @@ def _sweep_we(corner_wps):
     mission_times  = []
     we_valid       = []   # only keep feasible solves for gradient analysis
 
-    print(f"  Sweeping {len(we_values)} w_e values (w_time = 1.0) ...")
+    print(f"  Sweeping {len(we_values)} w_e values (w_time = 1.0, v_h = {v_h:.3f} m/s) ...")
     print(f"  {'w_e':>10}  {'Time [s]':>10}  {'Energy [J]':>10}  {'Peak P [W]':>10}")
     print("  " + "-" * 49)
 
@@ -440,7 +493,9 @@ def _sweep_we(corner_wps):
     res_by_we = {}  # cache results for re-use in main()
     for w_e in we_values:
         try:
-            res = _solve_corner(corner_wps, w_e, warm_start=prev_res)
+            res = _solve_corner(corner_wps, w_e, warm_start=prev_res,
+                                v_entry=v_h, v_exit=v_h,
+                                a_entry=a_entry, alpha_entry=alpha_entry)
             P_tot  = _compute_corner_power(res)
             T_tot  = float(res['time'][-1])
             peak_p = float(np.max(P_tot))
@@ -533,7 +588,68 @@ def _sweep_we(corner_wps):
         'we_time_ref':    we_time_ref,    # w_e giving minimum mission time
         'time_ref_idx':   time_ref_idx,
         'res_by_we':      res_by_we,      # cached trajectory results
+        'v_handoff':      v_h,            # handoff speed used for this sweep
     }
+
+
+def _find_smooth_v_handoff(corner_wps, a_entry=0.0, alpha_entry=0.0):
+    """! Find the largest V_HANDOFF that keeps corner transition jerk within J_LIM.
+
+    Tries V_HANDOFF, 80%, 60%, 40%, V_HANDOFF_MIN in sequence, solving the
+    corner OCP at w_energy=0.01 (a light energy-regularised formulation that
+    converges robustly without a warm start).  Returns the first speed that
+    satisfies the per-wheel jerk limit, or V_HANDOFF_MIN as a safe fallback.
+
+    @param a_entry<float>:     Forward acceleration at corner entry [m/s²].
+    @param alpha_entry<float>: Angular acceleration at corner entry [rad/s²].
+    @return float: chosen handoff velocity [m/s].
+    """
+    l_ref = ROBOT_PARAMS_BSPLINE['l']
+    r_ref = ROBOT_PARAMS_BSPLINE['r']
+    dt_c  = 0.01   # BSpline IK time step [s]
+    jerk_wheel_lim = J_LIM   # m/s³ — _compute_wheel_kinematics now returns m/s³
+
+    candidates = [
+        V_HANDOFF,
+        V_HANDOFF * 0.8,
+        V_HANDOFF * 0.6,
+        V_HANDOFF * 0.4,
+        V_HANDOFF_MIN,
+    ]
+
+    prev_res = None
+    for v_h in candidates:
+        v_h = max(float(v_h), V_HANDOFF_MIN)
+        try:
+            res = _solve_corner(corner_wps, w_energy=0.01,
+                                warm_start=prev_res,
+                                v_entry=v_h, v_exit=v_h,
+                                a_entry=a_entry, alpha_entry=alpha_entry)
+            wk = _compute_wheel_kinematics(res, l_ref, r_ref, dt_c)
+            # Max per-wheel angular jerk at entry (first 3 samples) and
+            # exit (last 3 samples) — the region adjacent to the JLAP segments.
+            n_edge = min(3, len(wk['jerk_r']))
+            j_entry = max(np.max(np.abs(wk['jerk_r'][:n_edge])),
+                          np.max(np.abs(wk['jerk_l'][:n_edge])))
+            j_exit  = max(np.max(np.abs(wk['jerk_r'][-n_edge:])),
+                          np.max(np.abs(wk['jerk_l'][-n_edge:])))
+            j_max = max(j_entry, j_exit)
+            print(f"  V_HANDOFF probe {v_h:.3f} m/s -> "
+                  f"edge jerk = {j_max:.2f} m/s^3  "
+                  f"(limit {jerk_wheel_lim:.2f} m/s^3)")
+            prev_res = res
+            if j_max <= jerk_wheel_lim:
+                if v_h < V_HANDOFF:
+                    print(f"  NOTE: V_HANDOFF reduced to {v_h:.3f} m/s "
+                          f"to satisfy jerk limit.")
+                return v_h
+        except Exception as exc:
+            print(f"  V_HANDOFF probe {v_h:.3f} m/s failed: {exc}")
+            prev_res = None
+
+    print(f"  WARNING: all V_HANDOFF probes exceeded jerk limit; "
+          f"using minimum {V_HANDOFF_MIN:.3f} m/s.")
+    return V_HANDOFF_MIN
 
 
 # =============================================================================
@@ -807,11 +923,9 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
     T1 = float(res_s1['time'][-1])
     Tc = float(res_corner_opt['time'][-1])
 
-    v_c_entry = float(res_s1['v'][-1])
-    # time_ik already ends at Tc (OCP endpoint) after the library fix, so no
-    # need to append Tc separately — doing so would create a duplicate timestamp.
-    corner_t = np.concatenate([[0.0], res_corner_opt['time_ik']])
-    corner_v = np.concatenate([[v_c_entry], res_corner_opt['v']])
+    # time_ik starts at 0 (linspace); no extra prepend needed.
+    corner_t = res_corner_opt['time_ik']
+    corner_v = res_corner_opt['v']
 
     ax.plot(res_s1['time'], res_s1['v'],
             '-', color=COL_S1, linewidth=1.8, label='Segment 1 (JLAP)')
@@ -855,7 +969,7 @@ def _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt):
         (wk_s2, COL_S2, 'Segment 2 (JLAP)'),
     ]
     row_keys    = [('omega_r', 'omega_l'), ('alpha_r', 'alpha_l'), ('jerk_r', 'jerk_l')]
-    row_ylabels = ['ω_wheel [rad/s]', 'α_wheel [rad/s²]', 'jerk [rad/s³]']
+    row_ylabels = ['ω_wheel [rad/s]', 'α_wheel [rad/s²]', 'jerk [m/s³]']
 
     for col, (wk, color, title) in enumerate(segments):
         for row, ((kr, kl), ylabel) in enumerate(zip(row_keys, row_ylabels)):
@@ -863,6 +977,9 @@ def _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt):
             ax.plot(wk['time'], wk[kr], '-',  color=color, linewidth=1.8, label='Right')
             ax.plot(wk['time'], wk[kl], '--', color=color, linewidth=1.8,
                     label='Left', alpha=0.75)
+            if row == 2:
+                ax.axhline( J_LIM, color='red', linewidth=1.0, linestyle=':', label=f'+J_LIM={J_LIM:.2f}')
+                ax.axhline(-J_LIM, color='red', linewidth=1.0, linestyle=':')
             ax.set_ylabel(ylabel)
             if row == 0:
                 ax.set_title(title, fontsize=9)
@@ -924,14 +1041,18 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     # Segment 1 - JLAP
     # ------------------------------------------------------------------
     s1 = res_s1['states']
-    omr_s1 = (res_s1['v'] + l_ref * res_s1['omega']) / r_ref
-    oml_s1 = (res_s1['v'] - l_ref * res_s1['omega']) / r_ref
+    omr_s1   = (res_s1['v'] + l_ref * res_s1['omega']) / r_ref
+    oml_s1   = (res_s1['v'] - l_ref * res_s1['omega']) / r_ref
+    alr_s1   = (res_s1['acc_path'] + l_ref * res_s1['alpha']) / r_ref
+    all_s1   = (res_s1['acc_path'] - l_ref * res_s1['alpha']) / r_ref
+    jrkr_s1  = np.gradient(alr_s1, JLAP_DT) * r_ref   # m/s³: d(alpha_r)/dt * r
+    jrkl_s1  = np.gradient(all_s1, JLAP_DT) * r_ref
     _save('segment1_jlap.csv',
           ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
-           'omega_r', 'omega_l'],
+           'omega_r', 'omega_l', 'alpha_r', 'alpha_l', 'jerk_r', 'jerk_l'],
           [res_s1['time'], s1[:, 0], s1[:, 1], s1[:, 2],
            res_s1['v'], res_s1['acc_path'], res_s1['omega'], res_s1['alpha'],
-           omr_s1, oml_s1])
+           omr_s1, oml_s1, alr_s1, all_s1, jrkr_s1, jrkl_s1])
 
     # ------------------------------------------------------------------
     # Corner - B-spline (kinematic outputs are on time_ik, denser than OCP grid)
@@ -943,26 +1064,40 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     y_c   = np.interp(t_ik, t_ocp, sc[:, 1])
     th_c  = np.interp(t_ik, t_ocp, sc[:, 2])
     pwr_c = np.interp(t_ik, t_ocp, res_corner_opt['power'])
+    # Wheel accelerations from analytical B-spline IK derivatives.
+    # Wheel jerks come directly from the OCP 3rd derivative (stored in the
+    # result dict by BSplineEnergyCoverage) — no numerical differentiation,
+    # so they are guaranteed to respect the OCP wheel-jerk constraint.
+    alr_c  = (res_corner_opt['acc_path'] + l_ref * res_corner_opt['alpha']) / r_ref
+    all_c  = (res_corner_opt['acc_path'] - l_ref * res_corner_opt['alpha']) / r_ref
+    jrkr_c = res_corner_opt['jerk_r']
+    jrkl_c = res_corner_opt['jerk_l']
 
     _save('corner_bspline.csv',
-          ['time', 'x', 'y', 'theta', 'v', 'omega', 'omega_r', 'omega_l', 'power'],
+          ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
+           'omega_r', 'omega_l', 'alpha_r', 'alpha_l', 'jerk_r', 'jerk_l', 'power'],
           [t_ik, x_c, y_c, th_c,
-           res_corner_opt['v'], res_corner_opt['omega'],
+           res_corner_opt['v'], res_corner_opt['acc_path'],
+           res_corner_opt['omega'], res_corner_opt['alpha'],
            res_corner_opt['omega_r'], res_corner_opt['omega_l'],
-           pwr_c])
+           alr_c, all_c, jrkr_c, jrkl_c, pwr_c])
 
     # ------------------------------------------------------------------
     # Segment 2 - JLAP
     # ------------------------------------------------------------------
     s2 = res_s2['states']
-    omr_s2 = (res_s2['v'] + l_ref * res_s2['omega']) / r_ref
-    oml_s2 = (res_s2['v'] - l_ref * res_s2['omega']) / r_ref
+    omr_s2   = (res_s2['v'] + l_ref * res_s2['omega']) / r_ref
+    oml_s2   = (res_s2['v'] - l_ref * res_s2['omega']) / r_ref
+    alr_s2   = (res_s2['acc_path'] + l_ref * res_s2['alpha']) / r_ref
+    all_s2   = (res_s2['acc_path'] - l_ref * res_s2['alpha']) / r_ref
+    jrkr_s2  = np.gradient(alr_s2, JLAP_DT) * r_ref   # m/s³: d(alpha_r)/dt * r
+    jrkl_s2  = np.gradient(all_s2, JLAP_DT) * r_ref
     _save('segment2_jlap.csv',
           ['time', 'x', 'y', 'theta', 'v', 'acc_path', 'omega', 'alpha',
-           'omega_r', 'omega_l'],
+           'omega_r', 'omega_l', 'alpha_r', 'alpha_l', 'jerk_r', 'jerk_l'],
           [res_s2['time'], s2[:, 0], s2[:, 1], s2[:, 2],
            res_s2['v'], res_s2['acc_path'], res_s2['omega'], res_s2['alpha'],
-           omr_s2, oml_s2])
+           omr_s2, oml_s2, alr_s2, all_s2, jrkr_s2, jrkl_s2])
 
     # ------------------------------------------------------------------
     # Stitched - continuous time axis across all three segments

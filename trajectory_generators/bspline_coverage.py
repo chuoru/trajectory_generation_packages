@@ -39,7 +39,8 @@ class BSplineCoverage:
                  eps_nonh=0.001, v_entry=None, v_exit=None,
                  a_entry=None, a_exit=None,
                  omega_entry=None, omega_exit=None,
-                 alpha_entry=None, alpha_exit=None):
+                 alpha_entry=None, alpha_exit=None,
+                 acc_max=None, jerk_max=None):
         """! Constructor.
         @param waypoints<list>: Via-points [[x, y, theta], ...]. At least 2.
         @param bound<float>: Half-width of the corridor around each segment [m].
@@ -54,6 +55,10 @@ class BSplineCoverage:
             None leaves the entry speed free (determined by the OCP).
         @param v_exit<float|None>: Exact linear speed [m/s] at trajectory end.
             None leaves the exit speed free (determined by the OCP).
+        @param acc_max<list|None>: [ax_max, ay_max, alpha_max] physical acceleration
+            limits [m/s², m/s², rad/s²]. None keeps default [20, 20, 10].
+        @param jerk_max<list|None>: [jx_max, jy_max, jalpha_max] physical jerk
+            limits [m/s³, m/s³, rad/s³]. None keeps default [1e3, 1e3, 100].
         """
         self._waypoints = np.array(waypoints, dtype=float)
         self._bound = bound
@@ -74,6 +79,13 @@ class BSplineCoverage:
         self._acc_min = -self._acc_max
         self._jerk_max = np.array([1e3, 1e3, 100.0])
         self._jerk_min = -self._jerk_max
+
+        if acc_max is not None:
+            self._acc_max = np.array(acc_max, dtype=float)
+            self._acc_min = -self._acc_max
+        if jerk_max is not None:
+            self._jerk_max = np.array(jerk_max, dtype=float)
+            self._jerk_min = -self._jerk_max
 
         self._n_pieces = len(waypoints) - 1
         self._n_Q = self._n_pieces * n_ctrl_pts
