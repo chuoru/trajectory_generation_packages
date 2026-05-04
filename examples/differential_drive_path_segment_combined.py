@@ -53,6 +53,10 @@ HEADING_IN  = 0.0           # [rad]
 HEADING_OUT = np.pi / 2     # [rad]
 BETA        = np.pi / 2     # 90-degree left turn [rad]
 
+# Straight lead-in / lead-out added to BSpline corner region so the OCP
+# starts and ends on a straight section, giving smooth curvature ramp-up.
+L_TRANSITION = 0.5   # m
+
 # PathSegment feasibility inputs
 L_INPUT     = 1.0           # desired standoff from corner vertex [m]
 B_INPUT     = 0.08          # desired deviation tolerance [m]
@@ -152,17 +156,23 @@ def main():
     print("=" * 60)
     print("Step 1: PathSegment - corner arc geometry")
     print("=" * 60)
-    seg_info = _segment_corner()
-    arc_entry = seg_info['arc_entry_world']
-    arc_exit  = seg_info['arc_exit_world']
+    seg_info      = _segment_corner()
+    arc_entry     = seg_info['arc_entry_world']
+    arc_exit      = seg_info['arc_exit_world']
+    arc_entry_ext = seg_info['arc_entry_ext_world']
+    arc_exit_ext  = seg_info['arc_exit_ext_world']
     print(f"  feasible = {seg_info['feasible']}   "
           f"L_seg = {seg_info['L_seg']:.3f} m   "
           f"R = {seg_info['R']:.3f} m   "
           f"b = {seg_info['b']:.4f} m")
-    print(f"  arc entry : ({arc_entry[0]:.3f}, {arc_entry[1]:.3f})")
-    print(f"  arc exit  : ({arc_exit[0]:.3f},  {arc_exit[1]:.3f})")
+    print(f"  arc entry : ({arc_entry[0]:.3f}, {arc_entry[1]:.3f})  "
+          f"handoff: ({arc_entry_ext[0]:.3f}, {arc_entry_ext[1]:.3f})")
+    print(f"  arc exit  : ({arc_exit[0]:.3f},  {arc_exit[1]:.3f})   "
+          f"handoff: ({arc_exit_ext[0]:.3f}, {arc_exit_ext[1]:.3f})")
 
-    corner_wps = _build_corner_waypoints(arc_entry, arc_exit)
+    # BSpline corner covers arc_entry_ext → arc_exit_ext (includes L_TRANSITION
+    # straight lead-in/out) so the OCP starts/ends on a straight section.
+    corner_wps = _build_corner_waypoints(arc_entry_ext, arc_exit_ext)
 
     # ------------------------------------------------------------------
     # Step 1b: Find the maximum handoff speed that keeps corner jerk ≤ J_LIM
@@ -181,7 +191,7 @@ def main():
     print("=" * 60)
     print(f"Step 2a: EulerJLAPCoverage - segment 1 (0 -> {v_handoff:.3f})")
     print("=" * 60)
-    res_s1 = _run_jlap_seg(WP_START, arc_entry.tolist(),
+    res_s1 = _run_jlap_seg(WP_START, arc_entry_ext.tolist(),
                             initial_vel=0.0, final_vel=v_handoff)
     print(f"  Segment 1: T = {res_s1['time'][-1]:.3f} s   "
           f"v_peak = {np.max(res_s1['v']):.3f} m/s   "
@@ -236,7 +246,7 @@ def main():
           f"(V_entry={v_handoff:.3f} -> 0)  "
           f"(corner actual exit = {v_corner_exit:.3f} m/s)")
     print("=" * 60)
-    res_s2 = _run_jlap_seg(arc_exit.tolist(), WP_END,
+    res_s2 = _run_jlap_seg(arc_exit_ext.tolist(), WP_END,
                             initial_vel=v_corner_exit, final_vel=0.0)
     print(f"  Segment 2: T = {res_s2['time'][-1]:.3f} s   "
           f"v_peak = {np.max(res_s2['v']):.3f} m/s   "
@@ -297,11 +307,17 @@ def _segment_corner():
     arc_world    = np.column_stack([xy_world, hdg_world])
     arc_exit     = arc_world[-1, :2].copy()
 
+    out_dir_vec   = np.array([np.cos(HEADING_OUT), np.sin(HEADING_OUT)])
+    arc_entry_ext = arc_entry - L_TRANSITION * in_dir
+    arc_exit_ext  = arc_exit  + L_TRANSITION * out_dir_vec
+
     res.update({
-        'arc_world':       arc_world,
-        'arc_entry_world': arc_entry,
-        'arc_exit_world':  arc_exit,
-        'corner_vertex':   corner,
+        'arc_world':           arc_world,
+        'arc_entry_world':     arc_entry,
+        'arc_exit_world':      arc_exit,
+        'arc_entry_ext_world': arc_entry_ext,
+        'arc_exit_ext_world':  arc_exit_ext,
+        'corner_vertex':       corner,
     })
     return res
 
@@ -702,11 +718,15 @@ def _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt):
     ax.plot(arc[:, 0], arc[:, 1], '-.', color='purple', linewidth=2.0,
             label=f'PathSegment arc  R={seg_info["R"]:.3f} m', zorder=3)
 
-    # Arc entry / exit
-    ae, ax_e = seg_info['arc_entry_world'], seg_info['arc_exit_world']
-    ax.plot(*ae, 's', color='purple', markersize=9, zorder=7,
-            label='Arc entry / exit')
-    ax.plot(*ax_e, 's', color='purple', markersize=9, zorder=7)
+    # Arc tangent points and JLAP handoff points (L_TRANSITION further out)
+    ae, ax_e       = seg_info['arc_entry_world'],     seg_info['arc_exit_world']
+    ae_ext, ax_ext = seg_info['arc_entry_ext_world'], seg_info['arc_exit_ext_world']
+    ax.plot(*ae,     's', color='purple',  markersize=9, zorder=7,
+            label='Arc tangent points')
+    ax.plot(*ax_e,   's', color='purple',  markersize=9, zorder=7)
+    ax.plot(*ae_ext, 'D', color='dimgray', markersize=7, zorder=7,
+            label='JLAP handoff points')
+    ax.plot(*ax_ext, 'D', color='dimgray', markersize=7, zorder=7)
 
     # JLAP segment 1
     s1 = res_s1['states']
@@ -846,8 +866,8 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
             label='PathSegment arc', zorder=2)
 
     # Corner waypoints
-    cwps = np.array(_build_corner_waypoints(seg_info['arc_entry_world'],
-                                            seg_info['arc_exit_world']))
+    cwps = np.array(_build_corner_waypoints(seg_info['arc_entry_ext_world'],
+                                            seg_info['arc_exit_ext_world']))
     ax.plot(cwps[:, 0], cwps[:, 1], 'o--', color=COL_REF, markersize=7,
             linewidth=1.0, label='Corner waypoints', zorder=3)
 
@@ -905,11 +925,15 @@ def _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
     ax.plot(s2[:, 0], s2[:, 1], '-', color=COL_S2, linewidth=2.0,
             label='Segment 2 (JLAP)', zorder=4)
 
-    # Arc entry / exit junction markers
-    ae, ax_e = seg_info['arc_entry_world'], seg_info['arc_exit_world']
-    ax.plot(*ae, 's', color='black', markersize=8, zorder=7,
-            label='Arc junctions')
-    ax.plot(*ax_e, 's', color='black', markersize=8, zorder=7)
+    # Arc tangent points and JLAP handoff points
+    ae, ax_e       = seg_info['arc_entry_world'],     seg_info['arc_exit_world']
+    ae_ext, ax_ext = seg_info['arc_entry_ext_world'], seg_info['arc_exit_ext_world']
+    ax.plot(*ae,     's', color='black',   markersize=8, zorder=7,
+            label='Arc tangent points')
+    ax.plot(*ax_e,   's', color='black',   markersize=8, zorder=7)
+    ax.plot(*ae_ext, 'D', color='dimgray', markersize=7, zorder=7,
+            label='JLAP handoff points')
+    ax.plot(*ax_ext, 'D', color='dimgray', markersize=7, zorder=7)
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
