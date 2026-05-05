@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 ##
 # @file differential_drive_comparison.py
 #
 # @brief Three-method trajectory comparison on a 5 m × 5 m L-shaped path.
 #
-# Path:  (0,0) → (5,0) → (5,5)   -- 90-degree left turn.
+# Path:  (0,0) -> (5,0) -> (5,5)   -- 90-degree left turn.
 #
 # Methods
 # -------
@@ -37,6 +37,7 @@
 # Standard library
 import sys
 import os
+import pathlib
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -102,7 +103,7 @@ V_HANDOFF_MIN = 0.10
 # BSpline OCP robot geometry (Methods B and C corner)
 ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.3}
 
-# TJ108 energy model — same for all three methods
+# TJ108 energy model -- same for all three methods
 ENERGY_COEFFS_RIGHT = [
     0.302433145557389,
     31.887262598534413,
@@ -126,9 +127,26 @@ COL_B   = 'tomato'
 COL_C   = 'seagreen'
 COL_REF = 'gray'
 
+# =============================================================================
+# PAPER FIGURE EXPORT
+# Set SAVE_FIGS = True to write paper-quality PNGs into the Writting directory.
+# =============================================================================
+SAVE_FIGS   = True
+FIG_OUT_DIR = (pathlib.Path(__file__).parent.parent.parent
+               / 'Writting' / 'energy_aware')
+
+
+def _savefig(fig, filename):
+    """Save fig to FIG_OUT_DIR/<filename> at 300 dpi when SAVE_FIGS is True."""
+    if SAVE_FIGS:
+        FIG_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = FIG_OUT_DIR / filename
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"  [paper] Saved {filename} -> {out}")
+
 
 def _make_bspline_common(v_h):
-    """Corner OCP kwargs factory — consistent with combined pipeline."""
+    """Corner OCP kwargs factory -- consistent with combined pipeline."""
     return dict(
         bound=0.25,
         n_ctrl_pts=6,
@@ -158,7 +176,7 @@ def _print_coverage_tolerances():
     print(f"    bound          = {0.25:.3f} m  (BSpline corridor half-width)")
     print(f"    eps_nonh       = {0.005:.4f}  (nonholonomic relaxation)")
     print("  Methods B & C  (EulerJLAP straight segments)")
-    print(f"    epsilon_offset = {0.1:.3f} m  (same as Method A) ✓")
+    print(f"    epsilon_offset = {0.1:.3f} m  (same as Method A) OK")
     print()
 
 
@@ -170,7 +188,7 @@ def main():
     # Method A: EulerJLAP full path
     # ------------------------------------------------------------------
     print("=" * 60)
-    print("Method A: EulerJLAPCoverage — full 3-waypoint path")
+    print("Method A: EulerJLAPCoverage -- full 3-waypoint path")
     print("=" * 60)
     res_a = _run_method_a()
     print(f"  T = {res_a['time'][-1]:.3f} s   "
@@ -184,8 +202,8 @@ def main():
     print()
     print("=" * 60)
     print("Methods B & C: Segmented pipeline  (shared PathSegment + JLAP + sweep)")
-    print("  B → corner at we_time_ref  (time-optimal)")
-    print("  C → corner at opt_we       (energy-optimal)")
+    print("  B -> corner at we_time_ref  (time-optimal)")
+    print("  C -> corner at opt_we       (energy-optimal)")
     print("=" * 60)
     seg  = _run_segmented_pipeline()
     we_b = seg['sweep']['we_time_ref']
@@ -212,16 +230,19 @@ def main():
     m_b = _compute_metrics(_stitch_states(res_b), T_b, pm_b['time'], pm_b['P'])
     m_c = _compute_metrics(_stitch_states(res_c), T_c, pm_c['time'], pm_c['P'])
     _print_comparison(m_a, m_b, m_c, we_b, we_c)
-    _print_coverage_tolerances()
 
     # ------------------------------------------------------------------
-    # Figures
+    # Figures (generated before any further console output so PNGs are
+    # written even if a subsequent print raises a codec error)
     # ------------------------------------------------------------------
     _fig1_xy_overlay(res_a, res_b, res_c, we_b, we_c)
     _fig2_velocity(res_a, res_b, res_c, we_b, we_c)
     _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c)
     _fig4_bars(m_a, m_b, m_c, we_b, we_c)
     _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c)
+    _fig6_junction_zoom(res_b, res_c, we_b, we_c)
+
+    _print_coverage_tolerances()
 
     plt.show()
     plt.close('all')
@@ -257,7 +278,7 @@ def _stitch_acc_jerk(res_seg):
 
 
 # =============================================================================
-# METHOD A — EulerJLAPCoverage, full path
+# METHOD A -- EulerJLAPCoverage, full path
 # =============================================================================
 def _run_method_a():
     return EulerJLAPCoverage(
@@ -273,7 +294,7 @@ def _run_method_a():
 
 
 # =============================================================================
-# METHODS B & C — shared segmented pipeline
+# METHODS B & C -- shared segmented pipeline
 # =============================================================================
 def _run_segmented_pipeline():
     """Run PathSegment + JLAP straights + w_e sweep.
@@ -293,7 +314,7 @@ def _run_segmented_pipeline():
 
     # JLAP segments end/start at the buffered handoff points (L_TRANSITION m
     # before/after the arc tangent points) so the handoff falls inside the
-    # cruise phase — acceleration and jerk are ~0 at both junctions.
+    # cruise phase -- acceleration and jerk are ~0 at both junctions.
     res_s1        = _run_jlap_seg(WP_START, arc_entry_ext.tolist(),
                                    initial_vel=0.0, final_vel=v_handoff)
     a_s1_exit     = float(res_s1['acc_path'][-1])
@@ -510,7 +531,7 @@ def _find_smooth_v_handoff(corner_wps, a_entry=0.0, alpha_entry=0.0):
 
 def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     v_h = float(v_handoff) if v_handoff is not None else V_HANDOFF
-    we_values = np.array([0.1, 0.05, 0.01, 0.005, 0.0])
+    we_values = np.array([0.1, 0.01, 0.005, 0.0])
 
     peak_powers, total_energies, mission_times, we_valid = [], [], [], []
     prev_res  = None
@@ -687,10 +708,10 @@ def _print_comparison(m_a, m_b, m_c, we_b, we_c):
     col_b = f'B (w_e={we_b:.3f})'
     col_c = f'C (w_e={we_c:.3f})'
     hdr = (f"\n  {'Metric':<20} {'Unit':<5} "
-           f"{'Method A':>12}  {col_b:>15}  {'Δ(B-A)':>8}  "
-           f"{col_c:>15}  {'Δ(C-A)':>8}")
+           f"{'Method A':>12}  {col_b:>15}  {'Delta(B-A)':>8}  "
+           f"{col_c:>15}  {'Delta(C-A)':>8}")
     print(hdr)
-    print("  " + "─" * 98)
+    print("  " + "-" * 98)
     for label, unit, key in rows:
         a, b, c = m_a[key], m_b[key], m_c[key]
         print(f"  {label:<20} {unit:<5} {a:>12.4f}  {b:>15.4f}  "
@@ -703,7 +724,7 @@ def _print_comparison(m_a, m_b, m_c, we_b, we_c):
 
 
 # =============================================================================
-# FIGURE 1 — XY trajectory overlay
+# FIGURE 1 -- XY trajectory overlay
 # =============================================================================
 def _fig1_xy_overlay(res_a, res_b, res_c, we_b, we_c):
     fig, ax = plt.subplots(figsize=(7, 7),
@@ -726,7 +747,7 @@ def _fig1_xy_overlay(res_a, res_b, res_c, we_b, we_c):
                     xytext=(st[0], st[1]),
                     arrowprops=dict(arrowstyle='->', color=COL_A, lw=1.1))
 
-    # Methods B and C share seg1 and seg2 — draw them once in a neutral colour
+    # Methods B and C share seg1 and seg2 -- draw them once in a neutral colour
     s_s1 = res_b['res_s1']['states']
     s_s2 = res_b['res_s2']['states']
     ax.plot(s_s1[:, 0], s_s1[:, 1], '-', color='dimgray', lw=1.8,
@@ -761,15 +782,16 @@ def _fig1_xy_overlay(res_a, res_b, res_c, we_b, we_c):
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.set_title('Figure 1 — XY Trajectory Overlay\n'
+    ax.set_title('Figure 1 -- XY Trajectory Overlay\n'
                  'A: EulerJLAP  |  B: corner time-opt  |  C: corner energy-opt')
     ax.legend(loc='upper left', fontsize=8)
     ax.grid(True)
     fig.tight_layout()
+    _savefig(fig, 'fig_comparison_xy.png')
 
 
 # =============================================================================
-# FIGURE 2 — Velocity profiles
+# FIGURE 2 -- Velocity profiles
 # =============================================================================
 def _fig2_velocity(res_a, res_b, res_c, we_b, we_c):
     fig, ax = plt.subplots(figsize=(10, 4),
@@ -815,14 +837,15 @@ def _fig2_velocity(res_a, res_b, res_c, we_b, we_c):
 
     ax.set_xlabel('time [s]')
     ax.set_ylabel('v [m/s]')
-    ax.set_title('Figure 2 — Velocity Profiles v(t)  (all three methods)')
+    ax.set_title('Figure 2 -- Velocity Profiles v(t)  (all three methods)')
     ax.legend(fontsize=8)
     ax.grid(True)
     fig.tight_layout()
+    _savefig(fig, 'fig_comparison_v.png')
 
 
 # =============================================================================
-# FIGURE 3 — Power profiles
+# FIGURE 3 -- Power profiles
 # =============================================================================
 def _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c):
     fig, ax = plt.subplots(figsize=(10, 4),
@@ -855,19 +878,20 @@ def _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c):
 
     ax.set_xlabel('time [s]')
     ax.set_ylabel('Power [W]')
-    ax.set_title('Figure 3 — Motor Power P(t)  (TJ108 model, uniform across methods)')
+    ax.set_title('Figure 3 -- Motor Power P(t)  (TJ108 model, uniform across methods)')
     ax.legend(fontsize=8)
     ax.grid(True)
     fig.tight_layout()
+    _savefig(fig, 'fig_comparison_power.png')
 
 
 # =============================================================================
-# FIGURE 4 — Summary metrics bar chart
+# FIGURE 4 -- Summary metrics bar chart
 # =============================================================================
 def _fig4_bars(m_a, m_b, m_c, we_b, we_c):
     fig, axes = plt.subplots(2, 2, figsize=(10, 7),
                              num='Figure 4 - Summary Metrics')
-    fig.suptitle('Figure 4 — Performance Metrics Comparison\n'
+    fig.suptitle('Figure 4 -- Performance Metrics Comparison\n'
                  f'A: EulerJLAP  |  B: corner w_e={we_b:.3f}  '
                  f'|  C: corner w_e={we_c:.3f}',
                  fontsize=10)
@@ -902,12 +926,12 @@ def _fig4_bars(m_a, m_b, m_c, we_b, we_c):
 
 
 # =============================================================================
-# FIGURE 5 — Acceleration and Jerk profiles
+# FIGURE 5 -- Acceleration and Jerk profiles
 # =============================================================================
 def _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c):
     fig, (ax_a, ax_j) = plt.subplots(2, 1, figsize=(10, 7), sharex=True,
                                       num='Figure 5 - Acceleration and Jerk Profiles')
-    fig.suptitle('Figure 5 — Linear Acceleration and Jerk Profiles  (all three methods)',
+    fig.suptitle('Figure 5 -- Linear Acceleration and Jerk Profiles  (all three methods)',
                  fontsize=10)
 
     xform_a = ax_a.get_xaxis_transform()
@@ -955,6 +979,76 @@ def _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c):
     ax_j.grid(True)
 
     fig.tight_layout()
+
+
+# =============================================================================
+# FIGURE 6 - Velocity continuity at junctions (paper figure)
+# =============================================================================
+def _fig6_junction_zoom(res_b, res_c, we_b, we_c):
+    """! Zoomed velocity profiles around both segment-junction points.
+
+    Left panel: S1 -> Corner junction (±ZOOM_DUR s relative to junction time).
+    Right panel: Corner -> S2 junction.
+
+    Overlays Methods B and C so the reader can verify C1 velocity continuity
+    at both handoff points.  Saved as fig_junction_zoom.png when SAVE_FIGS=True.
+
+    @param res_b<dict>: Segmented result dict for Method B.
+    @param res_c<dict>: Segmented result dict for Method C.
+    @param we_b<float>: w_e value for Method B.
+    @param we_c<float>: w_e value for Method C.
+    """
+    ZOOM_DUR = 0.5   # seconds shown on each side of the junction
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4),
+                             num='Figure 6 - Velocity Continuity at Junctions')
+    fig.suptitle('Figure 6 -- Velocity Continuity at Segment Junctions\n'
+                 f'(Methods B & C, ±{ZOOM_DUR} s window around each junction)',
+                 fontsize=10)
+
+    for res_seg, col, lbl in [
+        (res_b, COL_B, f'B: $w_e$={we_b:.3f}  (time-opt)'),
+        (res_c, COL_C, f'C: $w_e$={we_c:.3f}  (energy-opt)'),
+    ]:
+        T_s1     = res_seg['T_s1']
+        T_corner = res_seg['T_corner']
+
+        t_abs = np.concatenate([
+            res_seg['res_s1']['time'],
+            res_seg['res_corner']['time_ik'] + T_s1,
+            res_seg['res_s2']['time'][1:]    + T_s1 + T_corner,
+        ])
+        v_abs = np.concatenate([
+            res_seg['res_s1']['v'],
+            res_seg['res_corner']['v'],
+            res_seg['res_s2']['v'][1:],
+        ])
+
+        # Left panel: S1 -> Corner junction at t = T_s1
+        mask_l = (t_abs >= T_s1 - ZOOM_DUR) & (t_abs <= T_s1 + ZOOM_DUR)
+        axes[0].plot(t_abs[mask_l] - T_s1, v_abs[mask_l],
+                     '-', color=col, linewidth=1.8, label=lbl)
+
+        # Right panel: Corner -> S2 junction at t = T_s1 + T_corner
+        t_j2   = T_s1 + T_corner
+        mask_r = (t_abs >= t_j2 - ZOOM_DUR) & (t_abs <= t_j2 + ZOOM_DUR)
+        axes[1].plot(t_abs[mask_r] - t_j2, v_abs[mask_r],
+                     '-', color=col, linewidth=1.8, label=lbl)
+
+    for ax, title in [
+        (axes[0], 'Seg 1 -> Corner  (junction at t = 0)'),
+        (axes[1], 'Corner -> Seg 2  (junction at t = 0)'),
+    ]:
+        ax.axvline(0, color='black', linewidth=0.9, linestyle='--',
+                   label='junction')
+        ax.set_xlabel('Time relative to junction [s]')
+        ax.set_ylabel('v [m/s]')
+        ax.set_title(title, fontsize=9)
+        ax.legend(fontsize=8)
+        ax.grid(True)
+
+    fig.tight_layout()
+    _savefig(fig, 'fig_junction_zoom.png')
 
 
 # =============================================================================

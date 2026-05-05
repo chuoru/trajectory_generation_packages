@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 ##
 # @file differential_drive_path_segment_combined.py
 #
@@ -29,8 +29,11 @@
 # Standard library
 import sys
 import os
+import pathlib
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as _cm
+import matplotlib.colors as _mcolors
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -38,6 +41,24 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from trajectory_generators.path_segment import PathSegment
 from trajectory_generators.euler_jlap_coverage import EulerJLAPCoverage
 from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
+
+
+# =============================================================================
+# PAPER FIGURE EXPORT
+# Set SAVE_FIGS = True to write paper-quality PNGs into the Writting directory.
+# =============================================================================
+SAVE_FIGS   = True
+FIG_OUT_DIR = (pathlib.Path(__file__).parent.parent.parent
+               / 'Writting' / 'energy_aware')
+
+
+def _savefig(fig, filename):
+    """Save fig to FIG_OUT_DIR/<filename> at 300 dpi when SAVE_FIGS is True."""
+    if SAVE_FIGS:
+        FIG_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = FIG_OUT_DIR / filename
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"  [paper] Saved {filename} -> {out}")
 
 
 # =============================================================================
@@ -84,7 +105,7 @@ _j_r            = JLAP_ROBOT_PARAMS['wheel_radius']
 _j_m            = JLAP_ROBOT_PARAMS['robot_mass']
 _A_LIM          = (0.5 * _j_rated_torque * _j_r
                    / (0.25 * _j_m * _j_r**2 + _j_inertia))   # [m/s²]
-J_LIM = _A_LIM / (40.0 * JLAP_DT)                            # [m/s³]  ≈ 3.55
+J_LIM = _A_LIM / (40.0 * JLAP_DT)                            # [m/s³]  ~= 3.55
 
 # Handoff velocity: S1 exits at this speed; corner enters at this speed.
 # Taken from path_vel_lim so it is always within the JLAP kinematic limits.
@@ -170,12 +191,12 @@ def main():
     print(f"  arc exit  : ({arc_exit[0]:.3f},  {arc_exit[1]:.3f})   "
           f"handoff: ({arc_exit_ext[0]:.3f}, {arc_exit_ext[1]:.3f})")
 
-    # BSpline corner covers arc_entry_ext → arc_exit_ext (includes L_TRANSITION
+    # BSpline corner covers arc_entry_ext -> arc_exit_ext (includes L_TRANSITION
     # straight lead-in/out) so the OCP starts/ends on a straight section.
     corner_wps = _build_corner_waypoints(arc_entry_ext, arc_exit_ext)
 
     # ------------------------------------------------------------------
-    # Step 1b: Find the maximum handoff speed that keeps corner jerk ≤ J_LIM
+    # Step 1b: Find the maximum handoff speed that keeps corner jerk <= J_LIM
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
@@ -266,6 +287,7 @@ def main():
     _fig4_corner_and_full(seg_info, res_corner_time, res_corner_opt,
                           mA, mB, res_s1, res_s2, opt_we, we_time_ref)
     _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt)
+    _fig6_pareto_front(sweep)
 
     plt.show()
     plt.close('all')
@@ -367,8 +389,8 @@ def _solve_corner(corner_wps, w_energy, warm_start=None,
                   alpha_entry=0.0, alpha_exit=0.0):
     """! Run BSplineEnergyCoverage for the corner at a given w_energy.
 
-    @param v_entry<float|None>: Pinned entry speed [m/s]. None → V_HANDOFF.
-    @param v_exit<float|None>:  Pinned exit speed  [m/s]. None → V_HANDOFF.
+    @param v_entry<float|None>: Pinned entry speed [m/s]. None -> V_HANDOFF.
+    @param v_exit<float|None>:  Pinned exit speed  [m/s]. None -> V_HANDOFF.
     @param a_entry<float>: Pinned entry forward acceleration [m/s²].
     @param a_exit<float>:  Pinned exit  forward acceleration [m/s²].
     @param alpha_entry<float>: Pinned entry angular acceleration [rad/s²].
@@ -490,11 +512,10 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     """
     v_h = float(v_handoff) if v_handoff is not None else V_HANDOFF
 
-    # Fixed sweep values, run HIGH to LOW so that w_e=0 (time-optimal) is
-    # warm-started from w_e=0.005 and converges quickly.
-    # Higher w_e values converge easily on their own (energy term helps LBFGS).
-    # w_e=1.0 and above are avoided -- they give degenerate (very slow) solutions.
-    we_values = np.array([0.1, 0.05, 0.01, 0.005, 0.0])
+    # Sweep values run HIGH to LOW (warm-start chain).
+    # Hand-picked to skip the 0.04-0.09 range which causes IPOPT to exceed
+    # 5000 iterations on this problem geometry.
+    we_values = np.array([0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 0.0])
 
     peak_powers    = []
     total_energies = []
@@ -623,7 +644,7 @@ def _find_smooth_v_handoff(corner_wps, a_entry=0.0, alpha_entry=0.0):
     l_ref = ROBOT_PARAMS_BSPLINE['l']
     r_ref = ROBOT_PARAMS_BSPLINE['r']
     dt_c  = 0.01   # BSpline IK time step [s]
-    jerk_wheel_lim = J_LIM   # m/s³ — _compute_wheel_kinematics now returns m/s³
+    jerk_wheel_lim = J_LIM   # m/s³ -- _compute_wheel_kinematics now returns m/s³
 
     candidates = [
         V_HANDOFF,
@@ -643,7 +664,7 @@ def _find_smooth_v_handoff(corner_wps, a_entry=0.0, alpha_entry=0.0):
                                 a_entry=a_entry, alpha_entry=alpha_entry)
             wk = _compute_wheel_kinematics(res, l_ref, r_ref, dt_c)
             # Max per-wheel angular jerk at entry (first 3 samples) and
-            # exit (last 3 samples) — the region adjacent to the JLAP segments.
+            # exit (last 3 samples) -- the region adjacent to the JLAP segments.
             n_edge = min(3, len(wk['jerk_r']))
             j_entry = max(np.max(np.abs(wk['jerk_r'][:n_edge])),
                           np.max(np.abs(wk['jerk_l'][:n_edge])))
@@ -687,7 +708,7 @@ def _print_corner_comparison(mA, mB, opt_we, we_time_ref=0.0):
     hdr = (f"  {'Metric':<20} {'Unit':<6} "
            f"{t_col:>22}  {w_col:>18}  {'Delta%':>7}")
     print(hdr)
-    print("  " + "─" * 78)
+    print("  " + "-" * 78)
     for label, unit, key in rows:
         a, b = mA[key], mB[key]
         if abs(a) > 1e-12:
@@ -762,6 +783,7 @@ def _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt):
     ax.legend(loc='upper left', fontsize=8)
     ax.grid(True)
     fig.tight_layout()
+    _savefig(fig, 'fig_overview.png')
 
 
 # =============================================================================
@@ -798,6 +820,7 @@ def _fig2_jlap_profiles(res_s1, res_s2):
             ax.grid(True)
 
     fig.tight_layout()
+    _savefig(fig, 'fig_jlap.png')
 
 
 # =============================================================================
@@ -1016,6 +1039,77 @@ def _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt):
 
 
 # =============================================================================
+# FIGURE 6 - Pareto front (paper figure)
+# =============================================================================
+def _fig6_pareto_front(sweep):
+    """! Pareto front: peak power vs. total energy, parametric on w_energy.
+
+    Each sweep point is plotted as a scatter marker coloured by log10(w_e).
+    The Pareto knee (opt_we) and the time-reference point (we_time_ref) are
+    annotated.  This figure is saved as fig_pareto.png when SAVE_FIGS is True.
+    """
+    we     = sweep['we_values']
+    pp     = sweep['peak_powers']
+    te     = sweep['total_energies']
+    oi     = sweep['opt_idx']
+    tri    = sweep['time_ref_idx']
+    opt_we = sweep['opt_we']
+    we_ref = sweep['we_time_ref']
+
+    fig, ax = plt.subplots(figsize=(6, 4.5),
+                           num='Figure 6 - Pareto Front: Peak Power vs. Total Energy')
+
+    # Colour by log10(w_e); replace 0 with a small value for log scale.
+    we_pos  = np.where(we > 0, we, np.min(we[we > 0]) * 0.1)
+    log_we  = np.log10(we_pos)
+    norm    = _mcolors.Normalize(vmin=log_we.min(), vmax=log_we.max())
+    cmap    = _cm.viridis
+
+    # Connect points by a thin grey line in ascending energy order.
+    sort_e = np.argsort(te)
+    ax.plot(te[sort_e], pp[sort_e], '-', color='lightgray',
+            linewidth=1.0, zorder=1)
+
+    # Scatter all points.
+    sc = ax.scatter(te, pp, c=log_we, cmap=cmap, norm=norm,
+                    s=55, zorder=3)
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label(r'$\log_{10}(w_e)$', fontsize=8)
+
+    # Time-reference marker.
+    ax.scatter([te[tri]], [pp[tri]], marker='^', s=120, color='steelblue',
+               zorder=5, label=f'Time-ref  ($w_e$={we_ref:.4f})')
+    ax.annotate(f'time-ref\n$w_e$={we_ref:.4f}',
+                xy=(te[tri], pp[tri]),
+                xytext=(6, 6), textcoords='offset points',
+                fontsize=7, color='steelblue')
+
+    # Knee marker.
+    ax.scatter([te[oi]], [pp[oi]], marker='o', s=150, color='darkorange',
+               zorder=5, label=f'Knee  ($w_e$={opt_we:.4f})')
+    ax.annotate(f'knee\n$w_e$={opt_we:.4f}',
+                xy=(te[oi], pp[oi]),
+                xytext=(6, -22), textcoords='offset points',
+                fontsize=7, color='darkorange')
+
+    # Label remaining points with their w_e value.
+    for i, (t_e, p_p, w_e) in enumerate(zip(te, pp, we)):
+        if i not in (oi, tri):
+            ax.annotate(f'{w_e:.4f}', xy=(t_e, p_p),
+                        xytext=(4, 4), textcoords='offset points',
+                        fontsize=6, color='dimgray')
+
+    ax.set_xlabel('Total Energy [J]')
+    ax.set_ylabel('Peak Motor Power [W]')
+    ax.set_title('Figure 6 -- Pareto Front: Peak Power vs. Total Energy\n'
+                 '(corner B-spline OCP,  $w_t = 1.0$)')
+    ax.legend(fontsize=8)
+    ax.grid(True)
+    fig.tight_layout()
+    _savefig(fig, 'fig_pareto.png')
+
+
+# =============================================================================
 # CSV EXPORT
 # =============================================================================
 def _export_csv(res_s1, res_s2, res_corner_opt,
@@ -1090,7 +1184,7 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     pwr_c = np.interp(t_ik, t_ocp, res_corner_opt['power'])
     # Wheel accelerations from analytical B-spline IK derivatives.
     # Wheel jerks come directly from the OCP 3rd derivative (stored in the
-    # result dict by BSplineEnergyCoverage) — no numerical differentiation,
+    # result dict by BSplineEnergyCoverage) -- no numerical differentiation,
     # so they are guaranteed to respect the OCP wheel-jerk constraint.
     alr_c  = (res_corner_opt['acc_path'] + l_ref * res_corner_opt['alpha']) / r_ref
     all_c  = (res_corner_opt['acc_path'] - l_ref * res_corner_opt['alpha']) / r_ref
@@ -1130,7 +1224,7 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
     Tc = float(t_ocp[-1])
 
     # Corner endpoint (time_ik[-1] == Tc) has omega=0 by constraint; include it.
-    # S2 sample[0] is at t=0 → offset to T1+Tc, which duplicates the corner
+    # S2 sample[0] is at t=0 -> offset to T1+Tc, which duplicates the corner
     # endpoint timestamp.  Drop S2's first sample to avoid the duplicate.
     seg_id = np.concatenate([
         np.ones(len(res_s1['time'])),
