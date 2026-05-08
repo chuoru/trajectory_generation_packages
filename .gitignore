@@ -172,4 +172,4 @@ fabian/
 .claude/
 panoc_*
 reference/
-csv_output/
+csv_output*

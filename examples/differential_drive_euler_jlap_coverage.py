@@ -39,9 +39,9 @@ WAYPOINTS = [
 ]
 
 ROBOT_PARAMS = {
-    'robot_mass':         120.4,
+    'robot_mass':         50.4,
     'robot_width':        0.510,
-    'wheel_radius':       0.075,
+    'wheel_radius':       0.3,
     'gear_ratio':         40.0,
     'rated_motor_torque': 1.3,
     'rated_motor_speed':  3500.0,

@@ -74,9 +74,9 @@ L_WHEELBASE = 0.35
 
 # EulerJLAP robot params (all three methods use these for straight segments)
 JLAP_ROBOT_PARAMS = {
-    'robot_mass':         120.4,
+    'robot_mass':         50.4,
     'robot_width':        0.510,
-    'wheel_radius':       0.075,
+    'wheel_radius':       0.3,
     'gear_ratio':         40.0,
     'rated_motor_torque': 1.3,
     'rated_motor_speed':  3500.0,
@@ -132,7 +132,7 @@ COL_REF = 'gray'
 # Set SAVE_FIGS = True to write paper-quality PNGs into the Writting directory.
 # =============================================================================
 SAVE_FIGS   = True
-FIG_OUT_DIR = (pathlib.Path(__file__).parent.parent.parent
+FIG_OUT_DIR = (pathlib.Path(__file__).resolve().parent.parent.parent
                / 'Writting' / 'energy_aware')
 
 
@@ -181,9 +181,25 @@ def _print_coverage_tolerances():
 
 
 # =============================================================================
+# PAPER STYLE
+# =============================================================================
+def _set_paper_style():
+    plt.rcParams.update({
+        'font.size':       12,
+        'axes.labelsize':  12,
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 10,
+        'axes.titlesize':  12,
+        'axes.grid':       False,
+    })
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main():
+    _set_paper_style()
     # ------------------------------------------------------------------
     # Method A: EulerJLAP full path
     # ------------------------------------------------------------------
@@ -782,10 +798,7 @@ def _fig1_xy_overlay(res_a, res_b, res_c, we_b, we_c):
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.set_title('Figure 1 -- XY Trajectory Overlay\n'
-                 'A: EulerJLAP  |  B: corner time-opt  |  C: corner energy-opt')
-    ax.legend(loc='upper left', fontsize=8)
-    ax.grid(True)
+    ax.legend(loc='upper left', fontsize=10)
     fig.tight_layout()
     _savefig(fig, 'fig_comparison_xy.png')
 
@@ -823,23 +836,21 @@ def _fig2_velocity(res_a, res_b, res_c, we_b, we_c):
     # Junction markers (S1|C is the same for B and C since they share seg1)
     T_s1 = res_b['T_s1']
     ax.axvline(T_s1, color=COL_REF, ls=':', lw=1.0)
-    ax.text(T_s1, 0.94, 'S1|C', fontsize=7,
+    ax.text(T_s1, 0.94, 'S1|C', fontsize=8,
             color=COL_REF, ha='center', transform=xform)
     # C|S2 may differ slightly between B and C if corner times differ
     for res_seg, col, tag in [(res_b, COL_B, 'C|S2 B'),
                                (res_c, COL_C, 'C|S2 C')]:
         t_j = res_seg['T_s1'] + res_seg['T_corner']
         ax.axvline(t_j, color=col, ls=':', lw=0.9)
-    ax.text(res_b['T_s1'] + res_b['T_corner'], 0.94, 'C|S2 B', fontsize=7,
+    ax.text(res_b['T_s1'] + res_b['T_corner'], 0.94, 'C|S2 B', fontsize=8,
             color=COL_B, ha='center', transform=xform)
-    ax.text(res_c['T_s1'] + res_c['T_corner'], 0.86, 'C|S2 C', fontsize=7,
+    ax.text(res_c['T_s1'] + res_c['T_corner'], 0.86, 'C|S2 C', fontsize=8,
             color=COL_C, ha='center', transform=xform)
 
     ax.set_xlabel('time [s]')
     ax.set_ylabel('v [m/s]')
-    ax.set_title('Figure 2 -- Velocity Profiles v(t)  (all three methods)')
-    ax.legend(fontsize=8)
-    ax.grid(True)
+    ax.legend(fontsize=10)
     fig.tight_layout()
     _savefig(fig, 'fig_comparison_v.png')
 
@@ -867,7 +878,7 @@ def _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c):
         ax.annotate(f"{m['peak_power']:.1f} W",
                     xy=(pm['time'][idx], pm['P'][idx]),
                     xytext=(4, 4), textcoords='offset points',
-                    fontsize=7, color=col)
+                    fontsize=8, color=col)
 
     # Junction markers for B and C
     for res_seg, col in [(res_b, COL_B), (res_c, COL_C)]:
@@ -878,9 +889,7 @@ def _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c):
 
     ax.set_xlabel('time [s]')
     ax.set_ylabel('Power [W]')
-    ax.set_title('Figure 3 -- Motor Power P(t)  (TJ108 model, uniform across methods)')
-    ax.legend(fontsize=8)
-    ax.grid(True)
+    ax.legend(fontsize=10)
     fig.tight_layout()
     _savefig(fig, 'fig_comparison_power.png')
 
@@ -891,10 +900,6 @@ def _fig3_power(pm_a, pm_b, pm_c, m_a, m_b, m_c, res_b, res_c, we_b, we_c):
 def _fig4_bars(m_a, m_b, m_c, we_b, we_c):
     fig, axes = plt.subplots(2, 2, figsize=(10, 7),
                              num='Figure 4 - Summary Metrics')
-    fig.suptitle('Figure 4 -- Performance Metrics Comparison\n'
-                 f'A: EulerJLAP  |  B: corner w_e={we_b:.3f}  '
-                 f'|  C: corner w_e={we_c:.3f}',
-                 fontsize=10)
 
     specs = [
         (axes[0, 0], 'total_time',       'Total Time [s]'),
@@ -918,9 +923,7 @@ def _fig4_bars(m_a, m_b, m_c, we_b, we_c):
                     f'{val:.2f}', ha='center', va='bottom', fontsize=8)
         ax.set_xticks(x)
         ax.set_xticklabels(x_lbl)
-        ax.set_title(title, fontsize=9)
         ax.set_ylim(0, top * 1.15)
-        ax.grid(axis='y')
 
     fig.tight_layout()
 
@@ -931,8 +934,6 @@ def _fig4_bars(m_a, m_b, m_c, we_b, we_c):
 def _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c):
     fig, (ax_a, ax_j) = plt.subplots(2, 1, figsize=(10, 7), sharex=True,
                                       num='Figure 5 - Acceleration and Jerk Profiles')
-    fig.suptitle('Figure 5 -- Linear Acceleration and Jerk Profiles  (all three methods)',
-                 fontsize=10)
 
     xform_a = ax_a.get_xaxis_transform()
     xform_j = ax_j.get_xaxis_transform()
@@ -961,22 +962,22 @@ def _fig5_acc_jerk(res_a, res_b, res_c, we_b, we_c):
     T_s1 = res_b['T_s1']
     for ax, xform in [(ax_a, xform_a), (ax_j, xform_j)]:
         ax.axvline(T_s1, color=COL_REF, ls=':', lw=1.0)
-        ax.text(T_s1, 0.97, 'S1|C', fontsize=7, color=COL_REF,
+        ax.text(T_s1, 0.97, 'S1|C', fontsize=8, color=COL_REF,
                 ha='center', transform=xform)
         for res_seg, col, tag, y in [(res_b, COL_B, 'C|S2 B', 0.97),
                                      (res_c, COL_C, 'C|S2 C', 0.89)]:
             t_j = res_seg['T_s1'] + res_seg['T_corner']
             ax.axvline(t_j, color=col, ls=':', lw=0.9)
-            ax.text(t_j, y, tag, fontsize=7, color=col, ha='center', transform=xform)
+            ax.text(t_j, y, tag, fontsize=8, color=col, ha='center', transform=xform)
 
     ax_a.set_ylabel('Acceleration [m/s²]')
-    ax_a.legend(fontsize=8)
-    ax_a.grid(True)
+    ax_a.legend(fontsize=9)
+
 
     ax_j.set_xlabel('time [s]')
     ax_j.set_ylabel('Jerk [m/s³]')
-    ax_j.legend(fontsize=8)
-    ax_j.grid(True)
+    ax_j.legend(fontsize=9)
+
 
     fig.tight_layout()
 
@@ -1002,9 +1003,6 @@ def _fig6_junction_zoom(res_b, res_c, we_b, we_c):
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4),
                              num='Figure 6 - Velocity Continuity at Junctions')
-    fig.suptitle('Figure 6 -- Velocity Continuity at Segment Junctions\n'
-                 f'(Methods B & C, ±{ZOOM_DUR} s window around each junction)',
-                 fontsize=10)
 
     for res_seg, col, lbl in [
         (res_b, COL_B, f'B: $w_e$={we_b:.3f}  (time-opt)'),
@@ -1043,10 +1041,8 @@ def _fig6_junction_zoom(res_b, res_c, we_b, we_c):
                    label='junction')
         ax.set_xlabel('Time relative to junction [s]')
         ax.set_ylabel('v [m/s]')
-        ax.set_title(title, fontsize=9)
-        ax.legend(fontsize=8)
-        ax.grid(True)
-
+        ax.legend(fontsize=10)
+    
     fig.tight_layout()
     _savefig(fig, 'fig_junction_zoom.png')
 

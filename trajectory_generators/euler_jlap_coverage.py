@@ -45,9 +45,9 @@ class EulerJLAPCoverage:
     # DEFAULT ROBOT / MOTION PARAMETERS  (NewMiniAGV reference values)
     # ------------------------------------------------------------------
     _DEFAULT_ROBOT_PARAMS = {
-        'robot_mass':         120.4,    # [kg]
+        'robot_mass':         50.4,    # [kg]
         'robot_width':        0.510,    # [m]  full track width
-        'wheel_radius':       0.075,    # [m]
+        'wheel_radius':       0.3,    # [m]
         'gear_ratio':         40.0,     # [ ]  motor→wheel
         'rated_motor_torque': 1.3,      # [Nm]
         'rated_motor_speed':  3500.0,   # [RPM]
