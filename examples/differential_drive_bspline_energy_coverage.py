@@ -6,14 +6,14 @@
 # differential drive robot navigating an L-shaped path.
 #
 # Runs two solvers on the same waypoints:
-#   (A) BSplineCoverage         - minimizes total traversal time
-#   (B) BSplineEnergyCoverage   - minimizes w_time * T + w_energy * E_total
+#   (A) BSplineEnergyCoverage (w_energy=0) - minimizes total traversal time
+#   (B) BSplineEnergyCoverage             - minimizes w_time * T + w_energy * E_total
 #
 # Text output — full comparison table (12 metrics, time-opt vs energy-aware).
 #
 # Figures:
 #   Figure 1 — Coverage Trajectory
-#               XY path + control points, annotated with key metrics
+#               XY path + polyhedra corridor constraints + control points
 #   Figure 2 — Kinematic Profiles
 #               v(t), ω(t), linear acceleration, angular acceleration
 #   Figure 3 — TJ108 Energy Analysis
@@ -21,6 +21,10 @@
 #               energy bar comparison, energy density map
 #   Figure 4 — Time–Energy Pareto Front
 #               Sweep of w_time / w_energy with E/m as marker color
+#   Figure 5–7 — Dense w_energy sweep analysis (peak power, energy, time,
+#                trajectory overlay, kinematic & power profiles)
+#   Figure 8 — Per-wheel angular velocity, acceleration, and jerk
+#               (time-optimal vs energy-aware, right/left wheel overlay)
 #
 # @section author_doxygen_example Author(s)
 # - Created by Tran Viet Thanh on 2026/04/16
@@ -28,14 +32,35 @@
 # Standard library
 import sys
 import os
+import pathlib
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.collections import PatchCollection
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # Internal library
 from trajectory_generators.bspline_coverage import BSplineCoverage
 from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
+
+
+# =============================================================================
+# PAPER FIGURE EXPORT
+# Set SAVE_FIGS = True to write paper-quality PNGs into the Writting directory.
+# =============================================================================
+SAVE_FIGS   = True
+FIG_OUT_DIR = (pathlib.Path(__file__).resolve().parent.parent.parent
+               / 'Writting' / 'energy_aware')
+
+
+def _savefig(fig, filename):
+    """Save fig to FIG_OUT_DIR/<filename> at 300 dpi when SAVE_FIGS is True."""
+    if SAVE_FIGS:
+        FIG_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = FIG_OUT_DIR / filename
+        fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"  [paper] Saved {filename} -> {out}")
 
 
 # =============================================================================
@@ -86,6 +111,105 @@ P_ELECTRONICS = 2.0   # constant hotel load [W]
 # Colours used across all figures
 COL_A = 'steelblue'   # time-optimal
 COL_B = 'tomato'      # energy-aware
+
+
+# =============================================================================
+# PAPER STYLE
+# =============================================================================
+def _set_paper_style():
+    plt.rcParams.update({
+        'font.size':       12,
+        'axes.labelsize':  12,
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 10,
+        'axes.titlesize':  12,
+        'axes.grid':       False,
+    })
+
+
+# =============================================================================
+# Corridor (polyhedra) visualization
+# Ported from Fabian's getPolyhedronConstr_overlap_plot.m
+# =============================================================================
+def _draw_polyhedra_corridors(ax, waypoints, bound,
+                               color='gold', alpha=0.18,
+                               edgecolor='steelblue', lw=0.8):
+    """Draw rectangular corridor constraints (polyhedra) for each waypoint segment.
+
+    Each corridor extends `bound` beyond both segment endpoints in the travel
+    direction and ±bound in the normal direction, so consecutive corridors
+    overlap at the waypoint vertices — matching Fabian's overlap formulation.
+
+    @param ax<Axes>:         Target matplotlib axes.
+    @param waypoints<list>:  List of [x, y, ...] waypoints.
+    @param bound<float>:     Corridor half-width [m].
+    """
+    patches = []
+    for i in range(len(waypoints) - 1):
+        A = np.array(waypoints[i][:2], dtype=float)
+        B = np.array(waypoints[i + 1][:2], dtype=float)
+
+        d = B - A
+        d = d / np.linalg.norm(d)
+        n = np.array([-d[1], d[0]])
+
+        corners = np.array([
+            B + d * bound + n * bound,   # corner_up_right
+            B + d * bound - n * bound,   # corner_up_left
+            A - d * bound - n * bound,   # corner_down_left
+            A - d * bound + n * bound,   # corner_down_right
+        ])
+        patches.append(MplPolygon(corners, closed=True))
+
+    col = PatchCollection(patches, facecolor=color, alpha=alpha,
+                          edgecolor=edgecolor, linewidth=lw, zorder=1)
+    ax.add_collection(col)
+
+    # Dummy fill for the legend entry (draws nothing, registers the label).
+    ax.fill([], [], color=color, alpha=alpha + 0.15, edgecolor=edgecolor,
+            linewidth=lw, label=f'Corridor (bound={bound:.2f} m)')
+
+
+# =============================================================================
+# Helpers — wheel kinematics
+# =============================================================================
+def _compute_wheel_kinematics(res, l, r, dt):
+    """Compute per-wheel angular velocity, acceleration, and jerk.
+
+    Uses analytical OCP derivatives (jerk_r / jerk_l) when present in the
+    result dict (BSplineEnergyCoverage output); falls back to np.gradient.
+
+    @param res<dict>: Trajectory result dict.
+    @param l<float>:  Half-wheelbase [m].
+    @param r<float>:  Wheel radius [m].
+    @param dt<float>: Sampling interval for numerical differentiation [s].
+    @return dict with keys: time, omega_r, omega_l, alpha_r, alpha_l, jerk_r, jerk_l.
+    """
+    t     = res.get('time_ik', res['time'])
+    v     = res['v']
+    omega = res['omega']
+
+    omega_r = (v + l * omega) / r
+    omega_l = (v - l * omega) / r
+
+    if 'acc_path' in res and 'alpha' in res:
+        alpha_r = (res['acc_path'] + l * res['alpha']) / r
+        alpha_l = (res['acc_path'] - l * res['alpha']) / r
+    else:
+        alpha_r = np.gradient(omega_r, dt)
+        alpha_l = np.gradient(omega_l, dt)
+
+    if 'jerk_r' in res and 'jerk_l' in res:
+        jerk_r = res['jerk_r']
+        jerk_l = res['jerk_l']
+    else:
+        jerk_r = np.gradient(alpha_r, dt) * r
+        jerk_l = np.gradient(alpha_l, dt) * r
+
+    return dict(time=t, omega_r=omega_r, omega_l=omega_l,
+                alpha_r=alpha_r, alpha_l=alpha_l,
+                jerk_r=jerk_r, jerk_l=jerk_l)
 
 
 # =============================================================================
@@ -224,6 +348,8 @@ def _print_comparison(mA, mB):
 # Main
 # =============================================================================
 def main():
+    _set_paper_style()
+
     # --- Step 1: sweep to find the optimal w_energy --------------------------
     print("=" * 60)
     print("Step 1: w_energy sweep to identify optimal trade-off point")
@@ -278,13 +404,14 @@ def main():
     _fig2_kinematic_profiles(mA, mB)
     _fig3_energy_analysis(res_time, res_energy, mA, mB)
     _fig4_pareto()
+    _fig8_wheel_kinematics(res_time, res_energy)
 
     plt.show()
     plt.close('all')
 
 
 # =============================================================================
-# Figure 1 — Coverage Trajectory
+# Figure 1 — Coverage Trajectory (with polyhedra corridor constraints)
 # =============================================================================
 def _fig1_trajectories(res_time, res_energy, mA, mB):
     fig, ax = plt.subplots(figsize=(6, 6),
@@ -292,21 +419,24 @@ def _fig1_trajectories(res_time, res_energy, mA, mB):
     ax.set_aspect('equal')
     wps = np.array(WAYPOINTS)
 
+    # ---- Polyhedra corridor constraints (Fabian's overlap formulation) ----
+    _draw_polyhedra_corridors(ax, WAYPOINTS, COMMON_KWARGS['bound'])
+
     ax.plot(wps[:, 0], wps[:, 1], '--', color='gray',
-            linewidth=1.5, label='Reference path')
+            linewidth=1.5, label='Reference path', zorder=2)
 
     ax.plot(res_time['states'][:, 0],   res_time['states'][:, 1],
-            '-', color=COL_A, linewidth=2, label='Time-optimal')
+            '-', color=COL_A, linewidth=2, label='Time-optimal', zorder=4)
     ax.plot(res_time['ctrl_pts'][:, 0], res_time['ctrl_pts'][:, 1],
-            'x', color=COL_A, markersize=7, markeredgewidth=1.5)
+            'x', color=COL_A, markersize=7, markeredgewidth=1.5, zorder=5)
 
     ax.plot(res_energy['states'][:, 0],   res_energy['states'][:, 1],
-            '-', color=COL_B, linewidth=2, label='Energy-aware')
+            '-', color=COL_B, linewidth=2, label='Energy-aware', zorder=4)
     ax.plot(res_energy['ctrl_pts'][:, 0], res_energy['ctrl_pts'][:, 1],
-            'x', color=COL_B, markersize=7, markeredgewidth=1.5)
+            'x', color=COL_B, markersize=7, markeredgewidth=1.5, zorder=5)
 
     ax.plot(wps[:, 0], wps[:, 1], 'o', color='green',
-            markersize=8, label='Waypoints')
+            markersize=8, label='Waypoints', zorder=6)
 
     # Metric annotation box
     txt = (
@@ -324,11 +454,9 @@ def _fig1_trajectories(res_time, res_energy, mA, mB):
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.set_title('Figure 1 — Coverage Trajectory\n'
-                 'B-spline OCP: time-optimal vs energy-aware')
     ax.legend(loc='upper left')
-    ax.grid(True)
     fig.tight_layout()
+    _savefig(fig, 'fig_bspline_trajectory.png')
 
 
 # =============================================================================
@@ -361,7 +489,6 @@ def _fig2_kinematic_profiles(mA, mB):
                 color=COL_B, linewidth=2, label='Energy-aware')
         ax.set_ylabel(ylabel)
         ax.set_title(subtitle, fontsize=9)
-        ax.grid(True)
         ax.legend(fontsize=8, loc='upper right')
 
     axes[-1].set_xlabel('time [s]')
@@ -420,7 +547,6 @@ def _fig3_energy_analysis(res_time, res_energy, mA, mB):
     ax_p.set_title('Motor power  P(t) = P_right + P_left + P_elec',
                    fontsize=9)
     ax_p.legend(fontsize=7, ncol=3, loc='upper right')
-    ax_p.grid(True)
 
     # --- [1,0] Wheel angular velocity — right wheel -------------------------
     ax_wr.plot(t_A, mA['omega_r'], color=COL_A, linewidth=2,
@@ -431,7 +557,6 @@ def _fig3_energy_analysis(res_time, res_energy, mA, mB):
     ax_wr.set_xlabel('time [s]')
     ax_wr.set_title('Right-wheel angular velocity', fontsize=9)
     ax_wr.legend(fontsize=8)
-    ax_wr.grid(True)
 
     # --- [1,1] Wheel angular velocity — left wheel --------------------------
     ax_wl.plot(t_A, mA['omega_l'], color=COL_A, linewidth=2,
@@ -442,7 +567,6 @@ def _fig3_energy_analysis(res_time, res_energy, mA, mB):
     ax_wl.set_xlabel('time [s]')
     ax_wl.set_title('Left-wheel angular velocity', fontsize=9)
     ax_wl.legend(fontsize=8)
-    ax_wl.grid(True)
 
     # --- [2,0] Grouped energy metrics bar -----------------------------------
     metric_labels = ['E_total\n[J]', 'E/meter\n[J/m]',
@@ -473,7 +597,6 @@ def _fig3_energy_analysis(res_time, res_energy, mA, mB):
     ax_bar.set_xticklabels(metric_labels, fontsize=8)
     ax_bar.set_title('Energy metrics comparison', fontsize=9)
     ax_bar.legend(fontsize=8)
-    ax_bar.grid(axis='y')
 
     # --- [2,1] Energy density map — time-optimal path -----------------------
     t_spline = res_time['time']
@@ -492,7 +615,6 @@ def _fig3_energy_analysis(res_time, res_energy, mA, mB):
     ax_map.set_ylabel('y [m]')
     ax_map.set_title('Energy density (time-optimal path)', fontsize=9)
     ax_map.legend(fontsize=8)
-    ax_map.grid(True)
 
     fig.suptitle('Figure 3 — TJ108 Energy Analysis', fontsize=12)
 
@@ -567,9 +689,8 @@ def _fig4_pareto():
     print(hdr)
     print("  " + "─" * 66)
 
-    # Compute avg power for the summary (need to reuse stored eff / energies / times)
     for i, (w_t, w_e) in enumerate(weights):
-        dt_approx = times[i]                          # total time
+        dt_approx = times[i]
         avg_p = energies[i] / dt_approx if dt_approx > 0 else float('nan')
         print(f"  {w_t:>6.2f}  {w_e:>8.2f}  "
               f"{times[i]:>10.3f}  {energies[i]:>10.3f}  "
@@ -596,8 +717,8 @@ def _fig4_pareto():
     ax.set_ylabel('Total energy [J]')
     ax.set_title('Figure 4 — Time–Energy Pareto Front\n'
                  'Marker colour = energy efficiency [J/m]')
-    ax.grid(True)
     fig.tight_layout()
+    _savefig(fig, 'fig_bspline_pareto.png')
 
 
 # =============================================================================
@@ -717,7 +838,6 @@ def _fig5_we_sweep():
     ax.set_title('Peak Power Suppression')
     ax.set_xscale('log')
     ax.legend(fontsize=8)
-    ax.grid(True, which='both')
 
     # Panel (0,1): Total Energy vs w_energy
     ax = axes[0, 1]
@@ -731,7 +851,6 @@ def _fig5_we_sweep():
     ax.set_title('Total Energy vs w_energy')
     ax.set_xscale('log')
     ax.legend(fontsize=8)
-    ax.grid(True, which='both')
 
     # Panel (1,0): Mission Time vs w_energy
     ax = axes[1, 0]
@@ -745,7 +864,6 @@ def _fig5_we_sweep():
     ax.set_title('Mission Time vs w_energy')
     ax.set_xscale('log')
     ax.legend(fontsize=8)
-    ax.grid(True, which='both')
 
     # Panel (1,1): Second derivative of Peak Power curve
     ax = axes[1, 1]
@@ -760,7 +878,6 @@ def _fig5_we_sweep():
     ax.set_title('2nd Derivative — Optimal Trade-off Detection')
     ax.set_xscale('log')
     ax.legend(fontsize=8)
-    ax.grid(True, which='both')
 
     fig.tight_layout()
 
@@ -786,9 +903,12 @@ def _fig6_sweep_trajectories(we_values, all_states, all_time_traj, opt_idx):
     fig.suptitle('Figure 6 — Trajectory Overlay Across w_energy Sweep  '
                  '(w_time = 1.0,  bound = 0.08 m)', fontsize=12)
 
-    # --- Panel (0): XY overlay -----------------------------------------------
+    # --- Panel (0): XY overlay with polyhedra corridors ----------------------
     ax = axes[0]
     ax.set_aspect('equal')
+
+    _draw_polyhedra_corridors(ax, WAYPOINTS, COMMON_KWARGS['bound'])
+
     ax.plot(wps[:, 0], wps[:, 1], '--', color='gray', linewidth=1.5,
             zorder=2, label='Reference path')
 
@@ -814,7 +934,6 @@ def _fig6_sweep_trajectories(we_values, all_states, all_time_traj, opt_idx):
     ax.set_ylabel('y [m]')
     ax.set_title('XY Trajectory Overlay')
     ax.legend(fontsize=8)
-    ax.grid(True)
 
     # --- Panel (1): Heading angle θ(t) ----------------------------------------
     ax = axes[1]
@@ -839,7 +958,6 @@ def _fig6_sweep_trajectories(we_values, all_states, all_time_traj, opt_idx):
     ax.set_ylabel('Heading θ [deg]')
     ax.set_title('Heading Angle vs Time')
     ax.legend(fontsize=8)
-    ax.grid(True)
 
     fig.tight_layout()
 
@@ -907,7 +1025,6 @@ def _fig7_sweep_profiles(we_values, all_time_ik, all_v, all_omega,
              title='Cumulative Energy E(t)')
 
     for ax in axes.flat:
-        ax.grid(True)
         ax.legend(fontsize=7)
 
     # One shared colorbar per figure column pair
@@ -917,6 +1034,51 @@ def _fig7_sweep_profiles(we_values, all_time_ik, all_v, all_omega,
                  fraction=0.02, pad=0.04)
 
     fig.tight_layout()
+
+
+# =============================================================================
+# Figure 8 — Per-wheel angular velocity, acceleration, and jerk
+# =============================================================================
+def _fig8_wheel_kinematics(res_time, res_energy):
+    """Per-wheel kinematic profiles for time-optimal vs energy-aware solutions.
+
+    3 rows × 2 columns:
+      rows: angular velocity ω [rad/s], angular acceleration α [rad/s²], jerk [m/s³]
+      cols: time-optimal, energy-aware
+    Right wheel solid, left wheel dashed.
+    """
+    l  = ROBOT_PARAMS['l']
+    r  = ROBOT_PARAMS['r']
+    dt = 0.01   # BSpline IK time step [s]
+
+    wk_A = _compute_wheel_kinematics(res_time,   l, r, dt)
+    wk_B = _compute_wheel_kinematics(res_energy, l, r, dt)
+
+    fig, axes = plt.subplots(3, 2, figsize=(12, 9), sharex='col',
+                             num='Figure 8 — Per-Wheel Kinematics')
+    fig.suptitle('Figure 8 — Per-Wheel Angular Velocity / Acceleration / Jerk',
+                 fontsize=12)
+
+    row_keys    = [('omega_r', 'omega_l'), ('alpha_r', 'alpha_l'), ('jerk_r', 'jerk_l')]
+    row_ylabels = ['ω_wheel [rad/s]', 'α_wheel [rad/s²]', 'jerk [m/s³]']
+    col_data    = [(wk_A, COL_A, 'Time-optimal'), (wk_B, COL_B, 'Energy-aware')]
+
+    for col, (wk, color, title) in enumerate(col_data):
+        for row, ((kr, kl), ylabel) in enumerate(zip(row_keys, row_ylabels)):
+            ax = axes[row, col]
+            ax.plot(wk['time'], wk[kr], '-',  color=color, lw=1.8, label='Right')
+            ax.plot(wk['time'], wk[kl], '--', color=color, lw=1.8,
+                    label='Left', alpha=0.75)
+            ax.axhline(0, color='lightgray', lw=0.8, zorder=0)
+            ax.set_ylabel(ylabel)
+            if row == 0:
+                ax.set_title(title)
+            if row == 2:
+                ax.set_xlabel('time [s]')
+            ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    _savefig(fig, 'fig_bspline_wheel_kinematics.png')
 
 
 # =============================================================================
