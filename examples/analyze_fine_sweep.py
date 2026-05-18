@@ -49,6 +49,9 @@ COL_KNEE   = 'darkorange'
 COL_ENERGY = 'mediumorchid'
 COL_REF    = 'gray'
 
+# Wheel jerk limit [m/s³] — must match J_LIM in differential_drive_path_segment_fine_sweep.py
+J_LIM = 3.547
+
 
 # =============================================================================
 # DATA LOADING
@@ -71,13 +74,15 @@ def load_corners():
         w_e = float(p.stem.replace('corner_we_', ''))
         data = np.loadtxt(p, delimiter=',', skiprows=1)
         corners[w_e] = {
-            'time':  data[:, 0],
-            'x':     data[:, 1],
-            'y':     data[:, 2],
-            'theta': data[:, 3],
-            'v':     data[:, 4],
-            'omega': data[:, 5],
-            'power': data[:, 6],
+            'time':   data[:, 0],
+            'x':      data[:, 1],
+            'y':      data[:, 2],
+            'theta':  data[:, 3],
+            'v':      data[:, 4],
+            'omega':  data[:, 5],
+            'power':  data[:, 6],
+            'jerk_r': data[:, 7] if data.shape[1] > 7 else None,
+            'jerk_l': data[:, 8] if data.shape[1] > 8 else None,
         }
     return corners
 
@@ -85,6 +90,20 @@ def load_corners():
 # =============================================================================
 # FILTERING AND OPTIMUM SELECTION
 # =============================================================================
+def _pareto_front_idx(te, pp):
+    """Indices of non-dominated points in (te, pp) space, sorted by te ascending."""
+    n = len(te)
+    dominated = np.zeros(n, dtype=bool)
+    for i in range(n):
+        for j in range(n):
+            if i != j and te[j] <= te[i] and pp[j] <= pp[i]:
+                if te[j] < te[i] or pp[j] < pp[i]:
+                    dominated[i] = True
+                    break
+    idx = np.where(~dominated)[0]
+    return idx[np.argsort(te[idx])]
+
+
 def apply_filters(sw):
     we, pp, te, mt = sw['we'], sw['pp'], sw['te'], sw['mt']
     keep = np.ones(len(we), dtype=bool)
@@ -119,13 +138,23 @@ def pick_optima(sw):
     time_idx   = int(np.argmin(mt))
     energy_idx = int(np.argmin(te))
 
-    interior = np.arange(1, len(we) - 1)
-    if len(interior):
-        knee_idx = int(interior[np.argmin(d2[interior])])
-        if we[knee_idx] == 0.0 and len(we) > 1:
-            knee_idx = 1
+    # Pareto knee: restrict to the non-dominated front in (te, pp) space,
+    # then find the point with max perpendicular distance from the chord
+    # connecting the two extreme Pareto-optimal endpoints.
+    pf = _pareto_front_idx(te, pp)
+    if len(pf) >= 3:
+        te_n = (te - te.min()) / max(float(te.max() - te.min()), 1e-12)
+        pp_n = (pp - pp.min()) / max(float(pp.max() - pp.min()), 1e-12)
+        ax, ay = te_n[pf[0]], pp_n[pf[0]]
+        bx, by = te_n[pf[-1]], pp_n[pf[-1]]
+        denom = max(float(np.hypot(bx - ax, by - ay)), 1e-12)
+        pf_mid = pf[1:-1]
+        dist = np.abs((by - ay) * (te_n[pf_mid] - ax) - (bx - ax) * (pp_n[pf_mid] - ay)) / denom
+        knee_idx = int(pf_mid[np.argmax(dist)])
+    elif len(pf) >= 1:
+        knee_idx = int(pf[len(pf) // 2])
     else:
-        knee_idx = int(np.argmin(d2))
+        knee_idx = 0
 
     return {
         'time_idx':   time_idx,   'time_we':   float(we[time_idx]),
@@ -238,6 +267,70 @@ def fig_corner_power(corners, opt):
     _savefig(fig, 'fig_corner_power.png')
 
 
+def fig_corner_acceleration(corners, opt):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
+                                   num='Corner Acceleration Profiles')
+    for key_we, col, lbl_prefix in [
+        ('time_we',   COL_TIME,   'Time-opt'),
+        ('knee_we',   COL_KNEE,   'Knee'),
+        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    ]:
+        c, actual_we = _nearest_corner(corners, opt[key_we])
+        a_lin = np.gradient(c['v'],     c['time'])
+        a_ang = np.gradient(c['omega'], c['time'])
+        lbl = f'{lbl_prefix}  w_e={actual_we:.4f}'
+        ax1.plot(c['time'], a_lin, lw=1.8, color=col, label=lbl)
+        ax2.plot(c['time'], a_ang, lw=1.8, color=col)
+
+    ax1.set_ylabel('Linear accel. [m/s²]', fontsize=12)
+    ax2.set_ylabel('Angular accel. [rad/s²]', fontsize=12)
+    ax2.set_xlabel('time [s]', fontsize=12)
+    ax1.legend(fontsize=10)
+    ax1.tick_params(labelsize=11)
+    ax2.tick_params(labelsize=11)
+    fig.tight_layout()
+    _savefig(fig, 'fig_corner_acceleration.png')
+
+
+def fig_corner_jerk(corners, opt):
+    # Check if wheel jerk was saved in the CSV (new format); fall back to
+    # numerical differentiation of acceleration only if unavailable.
+    sample_c = next(iter(corners.values()))
+    has_wheel_jerk = sample_c.get('jerk_r') is not None
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
+                                   num='Corner Jerk Profiles')
+    for key_we, col, lbl_prefix in [
+        ('time_we',   COL_TIME,   'Time-opt'),
+        ('knee_we',   COL_KNEE,   'Knee'),
+        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    ]:
+        c, actual_we = _nearest_corner(corners, opt[key_we])
+        lbl = f'{lbl_prefix}  w_e={actual_we:.4f}'
+        if has_wheel_jerk:
+            ax1.plot(c['time'], c['jerk_r'], lw=1.8, color=col, label=lbl)
+            ax2.plot(c['time'], c['jerk_l'], lw=1.8, color=col)
+        else:
+            a_lin = np.gradient(c['v'],     c['time'])
+            a_ang = np.gradient(c['omega'], c['time'])
+            ax1.plot(c['time'], np.gradient(a_lin, c['time']), lw=1.8, color=col, label=lbl)
+            ax2.plot(c['time'], np.gradient(a_ang, c['time']), lw=1.8, color=col)
+
+    for ax in (ax1, ax2):
+        ax.axhline( J_LIM, color='red', lw=1.0, ls='--', label=f'±J_LIM={J_LIM:.3f}')
+        ax.axhline(-J_LIM, color='red', lw=1.0, ls='--')
+
+    ylabel = 'Wheel jerk right [m/s³]' if has_wheel_jerk else 'Linear jerk [m/s³]'
+    ax1.set_ylabel(ylabel, fontsize=12)
+    ax2.set_ylabel('Wheel jerk left [m/s³]' if has_wheel_jerk else 'Angular jerk [rad/s³]', fontsize=12)
+    ax2.set_xlabel('time [s]', fontsize=12)
+    ax1.legend(fontsize=10)
+    ax1.tick_params(labelsize=11)
+    ax2.tick_params(labelsize=11)
+    fig.tight_layout()
+    _savefig(fig, 'fig_corner_jerk.png')
+
+
 def fig_corner_xy(corners, opt):
     fig, ax = plt.subplots(figsize=(6, 6), num='Corner XY Paths')
     ax.set_aspect('equal')
@@ -288,6 +381,8 @@ def main():
     fig_pareto(sw, opt)
     fig_corner_velocity(corners, opt)
     fig_corner_power(corners, opt)
+    fig_corner_acceleration(corners, opt)
+    fig_corner_jerk(corners, opt)
     fig_corner_xy(corners, opt)
 
     plt.show()

@@ -467,6 +467,20 @@ def _compute_wheel_kinematics(res, l, r, dt):
                 jerk_r=jerk_r, jerk_l=jerk_l)
 
 
+def _pareto_front_idx(te, pp):
+    """Indices of non-dominated points in (te, pp) space, sorted by te ascending."""
+    n = len(te)
+    dominated = np.zeros(n, dtype=bool)
+    for i in range(n):
+        for j in range(n):
+            if i != j and te[j] <= te[i] and pp[j] <= pp[i]:
+                if te[j] < te[i] or pp[j] < pp[i]:
+                    dominated[i] = True
+                    break
+    idx = np.where(~dominated)[0]
+    return idx[np.argsort(te[idx])]
+
+
 def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     """! Sweep w_energy over 40 linearly-spaced values and identify three optimal points.
 
@@ -565,26 +579,35 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     d1 = np.gradient(peak_powers, we_values)
     d2 = np.gradient(d1, we_values)
 
-    # Pareto knee: minimum d2(P_peak)/d(w_e)^2 at interior points.
-    interior = np.arange(1, len(we_values) - 1)
-    if len(interior) > 0:
-        opt_idx = int(interior[np.argmin(d2[interior])])
-    else:
-        opt_idx = int(np.argmin(d2))
-    if float(we_values[opt_idx]) == 0.0 and len(we_values) > 1:
-        opt_idx = 1
-    opt_we = float(we_values[opt_idx])
-
-    # Time-optimal: sweep result with shortest mission time.
-    time_ref_idx = int(np.argmin(mission_times))
-    we_time_ref  = float(we_values[time_ref_idx])
+    # Time-optimal and energy-optimal anchor points (needed for Pareto knee chord).
+    time_ref_idx   = int(np.argmin(mission_times))
+    we_time_ref    = float(we_values[time_ref_idx])
+    energy_opt_idx = int(np.argmin(total_energies))
+    opt_we_energy  = float(we_values[energy_opt_idx])
     if we_time_ref != 0.0:
         print(f"  NOTE: w_e=0.0 did not yield minimum time in sweep; "
               f"using w_e={we_time_ref:.4f} as time reference.")
 
-    # Energy-optimal: sweep result with minimum total energy.
-    energy_opt_idx = int(np.argmin(total_energies))
-    opt_we_energy  = float(we_values[energy_opt_idx])
+    # Pareto knee: restrict to the non-dominated front in (te, pp) space,
+    # then find the point with max perpendicular distance from the chord
+    # connecting the two extreme Pareto-optimal endpoints.
+    _pf = _pareto_front_idx(total_energies, peak_powers)
+    if len(_pf) >= 3:
+        _te_n = (total_energies - total_energies.min()) / max(float(total_energies.max() - total_energies.min()), 1e-12)
+        _pp_n = (peak_powers    - peak_powers.min())    / max(float(peak_powers.max()    - peak_powers.min()),    1e-12)
+        _ax, _ay = _te_n[_pf[0]], _pp_n[_pf[0]]
+        _bx, _by = _te_n[_pf[-1]], _pp_n[_pf[-1]]
+        _denom = max(float(np.hypot(_bx - _ax, _by - _ay)), 1e-12)
+        _pf_mid = _pf[1:-1]
+        _dist  = np.abs((_by - _ay) * (_te_n[_pf_mid] - _ax) - (_bx - _ax) * (_pp_n[_pf_mid] - _ay)) / _denom
+        opt_idx = int(_pf_mid[np.argmax(_dist)])
+    elif len(_pf) >= 1:
+        opt_idx = int(_pf[len(_pf) // 2])
+    else:
+        opt_idx = energy_opt_idx
+    if float(we_values[opt_idx]) == 0.0 and len(we_values) > 1:
+        opt_idx = 1
+    opt_we = float(we_values[opt_idx])
 
     print()
     print(f"  Time-optimal   w_e = {we_time_ref:.6f}  "
@@ -1253,10 +1276,13 @@ def _export_csv(res_s1, res_s2,
             pwr_c = np.interp(t_ik, t_ocp, res_c['power'])
             fname = f'corner_we_{w_e:.6f}.csv'
             path  = os.path.join(corners_dir, fname)
+            jrkr_c = res_c.get('jerk_r', np.zeros_like(res_c['v']))
+            jrkl_c = res_c.get('jerk_l', np.zeros_like(res_c['v']))
             data  = np.column_stack([t_ik, x_c, y_c, th_c,
-                                     res_c['v'], res_c['omega'], pwr_c])
+                                     res_c['v'], res_c['omega'], pwr_c,
+                                     jrkr_c, jrkl_c])
             np.savetxt(path, data, delimiter=',',
-                       header='time,x,y,theta,v,omega,power',
+                       header='time,x,y,theta,v,omega,power,jerk_r,jerk_l',
                        comments='', fmt='%.8f')
         print(f"  Saved {len(sweep['res_by_we'])} corner files -> {corners_dir}/")
 

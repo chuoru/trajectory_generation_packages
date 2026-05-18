@@ -41,7 +41,6 @@ import numpy as np
 
 # External library
 import casadi as cs
-from scipy.interpolate import CubicSpline as _CubicSpline
 from scipy.interpolate import PchipInterpolator as _Pchip
 
 # Internal library
@@ -281,18 +280,12 @@ class BSplineEnergyCoverage(BSplineCoverage):
         # Append the exact OCP endpoint so that omega_exit / v_exit boundary
         # constraints are reflected in the output arrays (not dropped by [:-1]).
         t_interp = np.append(t_inner, t_real[-1])
-        cs_v  = _CubicSpline(t_real, v_ocp)
-        cs_om = _CubicSpline(t_real, om_ocp)
-        v_arr     = cs_v(t_interp)
-        omega_arr = cs_om(t_interp)
-        # acc_path / alpha are interpolated directly from the OCP-level analytical
-        # values (not from CubicSpline derivatives).  This eliminates the double
-        # np.gradient cascade (the original source of ±200-400 rad/s³ boundary
-        # spikes) while preserving the exact pinned boundary values from the OCP.
-        acc_path_arr = _CubicSpline(t_real, a_ocp)(t_interp)
-        # Pchip for alpha: monotone-preserving interpolation avoids the
-        # overshoot that a natural CubicSpline produces when alpha_ocp
-        # transitions from increasing to decreasing (e.g. when omega saturates).
+        # Pchip for all kinematic signals: monotonicity-preserving interpolation
+        # avoids the overshoot that CubicSpline produces on the non-uniform OCP
+        # time grid that results from energy-weighted objectives (w_e > 0).
+        v_arr        = _Pchip(t_real, v_ocp)(t_interp)
+        omega_arr    = _Pchip(t_real, om_ocp)(t_interp)
+        acc_path_arr = _Pchip(t_real, a_ocp)(t_interp)
         alpha_arr    = _Pchip(t_real, alpha_ocp)(t_interp)
 
         l, r = self._robot['l'], self._robot['r']

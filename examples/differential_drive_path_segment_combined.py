@@ -41,6 +41,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from trajectory_generators.path_segment import PathSegment
 from trajectory_generators.euler_jlap_coverage import EulerJLAPCoverage
 from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
+from models.differential_drive import DifferentialDrive
+from simulators.time_stepping import TimeStepping
+from controllers.purepursuit import PurePursuit
+from controllers.trajectory import Trajectory
 
 
 # =============================================================================
@@ -295,6 +299,25 @@ def main():
     _export_csv(res_s1, res_s2, res_corner_opt)
 
     # ------------------------------------------------------------------
+    # Pure Pursuit closed-loop tracking
+    # To load from the exported CSV instead, use:
+    #   csv_path = os.path.join(os.path.dirname(__file__), 'csv_output',
+    #                           'trajectory_stitched.csv')
+    #   ref_traj = Trajectory.from_stitched_csv(csv_path, dt=0.05)
+    # ------------------------------------------------------------------
+    print()
+    print("=" * 60)
+    print("Step 4: PurePursuit closed-loop tracking")
+    print("=" * 60)
+    ref_traj  = _build_reference_trajectory(res_s1, res_s2, res_corner_opt, dt=0.05)
+    sim_pp    = _run_purepursuit(ref_traj)
+    print(f"  Reference waypoints : {len(ref_traj.x)}")
+    print(f"  Simulation steps    : {sim_pp.x_out.shape[1]}")
+    trk_end   = sim_pp.x_out[:2, -1]
+    ref_end   = ref_traj.x[-1, :2]
+    print(f"  Final position error: {np.hypot(*(trk_end - ref_end)) * 1e3:.1f} mm")
+
+    # ------------------------------------------------------------------
     # Figures
     # ------------------------------------------------------------------
     _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt)
@@ -304,6 +327,7 @@ def main():
                           mA, mB, res_s1, res_s2, opt_we, we_time_ref)
     _fig5_wheel_kinematics(res_s1, res_s2, res_corner_opt)
     _fig6_pareto_front(sweep)
+    _fig7_purepursuit(ref_traj, sim_pp)
 
     plt.show()
     plt.close('all')
@@ -519,6 +543,20 @@ def _compute_wheel_kinematics(res, l, r, dt):
                 jerk_r=jerk_r, jerk_l=jerk_l)
 
 
+def _pareto_front_idx(te, pp):
+    """Indices of non-dominated points in (te, pp) space, sorted by te ascending."""
+    n = len(te)
+    dominated = np.zeros(n, dtype=bool)
+    for i in range(n):
+        for j in range(n):
+            if i != j and te[j] <= te[i] and pp[j] <= pp[i]:
+                if te[j] < te[i] or pp[j] < pp[i]:
+                    dominated[i] = True
+                    break
+    idx = np.where(~dominated)[0]
+    return idx[np.argsort(te[idx])]
+
+
 def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     """! Sweep w_energy in [0, 1e-3 ... 1] and identify optimal trade-off.
 
@@ -605,32 +643,41 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     d1 = np.gradient(peak_powers, we_values)
     d2 = np.gradient(d1, we_values)
 
-    # Restrict optimum search to interior points: the first-order finite
-    # differences at the two boundary points are one-sided and less accurate.
-    # Also require opt_we > 0 so the comparison is always time-opt vs energy-opt.
-    interior = np.arange(1, len(we_values) - 1)
-    if len(interior) > 0:
-        opt_idx = int(interior[np.argmin(d2[interior])])
+    # Time reference and energy-optimal anchor points (needed for Pareto knee chord).
+    # w_e=0.0 is the pure time-optimal formulation but its flat Hessian causes
+    # LBFGS to sometimes converge to a suboptimal local minimum.  Using the
+    # sweep minimum is always a valid (and often tighter) time reference.
+    time_ref_idx   = int(np.argmin(mission_times))
+    we_time_ref    = float(we_values[time_ref_idx])
+    _energy_anchor = int(np.argmin(total_energies))
+
+    # Pareto knee: restrict to the non-dominated front in (te, pp) space,
+    # then find the point with max perpendicular distance from the chord
+    # connecting the two extreme Pareto-optimal endpoints.
+    _pf = _pareto_front_idx(total_energies, peak_powers)
+    if len(_pf) >= 3:
+        _te_n = (total_energies - total_energies.min()) / max(float(total_energies.max() - total_energies.min()), 1e-12)
+        _pp_n = (peak_powers    - peak_powers.min())    / max(float(peak_powers.max()    - peak_powers.min()),    1e-12)
+        _ax, _ay = _te_n[_pf[0]], _pp_n[_pf[0]]
+        _bx, _by = _te_n[_pf[-1]], _pp_n[_pf[-1]]
+        _denom = max(float(np.hypot(_bx - _ax, _by - _ay)), 1e-12)
+        _pf_mid = _pf[1:-1]
+        _dist  = np.abs((_by - _ay) * (_te_n[_pf_mid] - _ax) - (_bx - _ax) * (_pp_n[_pf_mid] - _ay)) / _denom
+        opt_idx = int(_pf_mid[np.argmax(_dist)])
+    elif len(_pf) >= 1:
+        opt_idx = int(_pf[len(_pf) // 2])
     else:
-        opt_idx = int(np.argmin(d2))
+        opt_idx = _energy_anchor
     # Ensure the selected opt_we differs from 0 for a meaningful comparison.
     if float(we_values[opt_idx]) == 0.0 and len(we_values) > 1:
         opt_idx = 1
     opt_we  = float(we_values[opt_idx])
-
-    # Time reference: the sweep result with the shortest mission time.
-    # w_e=0.0 is the pure time-optimal formulation but its flat Hessian causes
-    # LBFGS to sometimes converge to a suboptimal local minimum.  Using the
-    # sweep minimum is always a valid (and often tighter) time reference.
-    time_ref_idx = int(np.argmin(mission_times))
-    we_time_ref  = float(we_values[time_ref_idx])
     if we_time_ref != 0.0:
         print(f"  NOTE: w_e=0.0 did not yield minimum time in sweep; "
               f"using w_e={we_time_ref:.4f} as time reference.")
 
     print()
-    print(f"  Optimal w_e = {opt_we:.6f}   "
-          f"(d2(P_peak)/d(w_e)2 = {d2[opt_idx]:.4f})")
+    print(f"  Optimal w_e = {opt_we:.6f}   (Pareto knee)")
     print(f"    Peak Power   = {peak_powers[opt_idx]:.3f} W")
     print(f"    Total Energy = {total_energies[opt_idx]:.3f} J")
     print(f"    Mission Time = {mission_times[opt_idx]:.3f} s")
@@ -1302,6 +1349,129 @@ def _export_csv(res_s1, res_s2, res_corner_opt,
            seg_id])
 
     print(f"  Output directory: {out_dir}")
+
+
+# =============================================================================
+# PURE PURSUIT TRACKING
+# =============================================================================
+def _build_reference_trajectory(res_s1, res_s2, res_corner_opt, dt=0.05):
+    """! Stitch the three segments into a uniform-dt Trajectory for controllers.
+
+    The raw segments have non-uniform time grids (JLAP: 0.05 s, BSpline IK: 0.01 s).
+    This function concatenates them on a raw time axis, then resamples to dt.
+
+    @param res_s1<dict>:          EulerJLAP result for segment 1.
+    @param res_s2<dict>:          EulerJLAP result for segment 2.
+    @param res_corner_opt<dict>:  BSplineEnergy result for the corner.
+    @param dt<float>:             Target sampling interval [s].
+    @return Trajectory instance ready for PurePursuit / FeedForward.
+    """
+    T1   = float(res_s1['time'][-1])
+    t_ik = res_corner_opt['time_ik']          # starts at 0
+    t_ocp = res_corner_opt['time']
+    Tc   = float(t_ocp[-1])
+    sc   = res_corner_opt['states']
+
+    x_c  = np.interp(t_ik, t_ocp, sc[:, 0])
+    y_c  = np.interp(t_ik, t_ocp, sc[:, 1])
+    th_c = np.interp(t_ik, t_ocp, sc[:, 2])
+
+    t_raw  = np.concatenate([res_s1['time'],
+                              t_ik + T1,
+                              res_s2['time'][1:] + T1 + Tc])
+    x_raw  = np.concatenate([res_s1['states'][:, 0],  x_c,  res_s2['states'][1:, 0]])
+    y_raw  = np.concatenate([res_s1['states'][:, 1],  y_c,  res_s2['states'][1:, 1]])
+    th_raw = np.concatenate([res_s1['states'][:, 2],  th_c, res_s2['states'][1:, 2]])
+    v_raw  = np.concatenate([res_s1['v'],  res_corner_opt['v'],  res_s2['v'][1:]])
+    w_raw  = np.concatenate([res_s1['omega'], res_corner_opt['omega'], res_s2['omega'][1:]])
+
+    t_uni  = np.arange(t_raw[0], t_raw[-1], dt)
+    x_uni  = np.interp(t_uni, t_raw, x_raw)
+    y_uni  = np.interp(t_uni, t_raw, y_raw)
+    th_uni = np.interp(t_uni, t_raw, th_raw)
+    v_uni  = np.interp(t_uni, t_raw, v_raw)
+    w_uni  = np.interp(t_uni, t_raw, w_raw)
+
+    states   = np.column_stack([x_uni, y_uni, th_uni])  # (N, 3)
+    controls = np.vstack([v_uni, w_uni])                  # (2, N)
+
+    return Trajectory(x=states, u=controls, t=t_uni, sampling_time=dt)
+
+
+def _run_purepursuit(ref_traj):
+    """! Run closed-loop Pure Pursuit tracking on the reference trajectory.
+
+    @param ref_traj<Trajectory>: Uniform-dt reference from _build_reference_trajectory.
+    @return TimeStepping instance with x_out / u_out / t_out populated.
+    """
+    wheel_base = 2.0 * ROBOT_PARAMS_BSPLINE['l']
+    model      = DifferentialDrive(wheel_base=wheel_base)
+    sim        = TimeStepping(model, float(ref_traj.t[-1]), ref_traj.sampling_time)
+    controller = PurePursuit(model, ref_traj)
+
+    initial_position = list(ref_traj.x[0])
+    sim.run_with_controller(initial_position, ref_traj, controller)
+    return sim
+
+
+def _fig7_purepursuit(ref_traj, sim):
+    """! Four-panel tracking analysis: XY path, speed, angular velocity, cross-track error."""
+    t = sim.t_out
+    ref_xy  = ref_traj.x[:, :2]                    # (N, 2) reference positions
+    trk_xy  = sim.x_out[:2, :].T                   # (N, 2) tracked positions
+
+    # Cross-track error: distance from each tracked point to nearest reference point.
+    cte = np.array([
+        np.min(np.hypot(ref_xy[:, 0] - pt[0], ref_xy[:, 1] - pt[1]))
+        for pt in trk_xy
+    ])
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9),
+                             num='Figure 7 - PurePursuit Tracking')
+
+    # ---- [0,0] XY path ----
+    ax = axes[0, 0]
+    ax.set_aspect('equal')
+    ax.plot(ref_traj.x[:, 0], ref_traj.x[:, 1], '--',
+            color=COL_REF, linewidth=1.5, label='Reference', zorder=2)
+    ax.plot(trk_xy[:, 0], trk_xy[:, 1], '-',
+            color=COL_OPT, linewidth=2.0, label='PurePursuit tracked', zorder=3)
+    ax.plot(*ref_traj.x[0, :2],  'o', color='green',  markersize=8, zorder=4, label='Start')
+    ax.plot(*ref_traj.x[-1, :2], 's', color='red',    markersize=8, zorder=4, label='Goal')
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.legend(fontsize=10)
+
+    # ---- [0,1] Linear velocity ----
+    ax = axes[0, 1]
+    ax.plot(ref_traj.t, ref_traj.u[0, :], '--',
+            color=COL_REF, linewidth=1.5, label='Reference v')
+    ax.plot(t, sim.u_out[0, :], '-',
+            color=COL_OPT, linewidth=1.8, label='Tracked v')
+    ax.set_xlabel('time [s]')
+    ax.set_ylabel('v [m/s]')
+    ax.legend(fontsize=10)
+
+    # ---- [1,0] Angular velocity ----
+    ax = axes[1, 0]
+    ax.plot(ref_traj.t, ref_traj.u[1, :], '--',
+            color=COL_REF, linewidth=1.5, label='Reference ω')
+    ax.plot(t, sim.u_out[1, :], '-',
+            color=COL_OPT, linewidth=1.8, label='Tracked ω')
+    ax.axhline(0, color='lightgray', linewidth=0.8, zorder=0)
+    ax.set_xlabel('time [s]')
+    ax.set_ylabel('ω [rad/s]')
+    ax.legend(fontsize=10)
+
+    # ---- [1,1] Cross-track error ----
+    ax = axes[1, 1]
+    ax.plot(t, cte * 1e3, '-', color='tomato', linewidth=1.8)
+    ax.set_xlabel('time [s]')
+    ax.set_ylabel('Cross-track error [mm]')
+    ax.set_ylim(bottom=0)
+
+    fig.tight_layout()
+    _savefig(fig, 'fig_purepursuit.png')
 
 
 # =============================================================================
