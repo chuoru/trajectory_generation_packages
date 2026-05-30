@@ -216,26 +216,26 @@ def _compute_wheel_kinematics(res, l, r, dt):
 # Helpers — power computation and metrics
 # =============================================================================
 def _compute_wheel_power(v_arr, omega_arr, robot_params, cr, cl, p_elec):
-    """Evaluate the TJ108 power model on IK-output (v, omega) arrays.
+    """Evaluate the polynomial power model on IK-output (v, omega) arrays.
 
     @return (P_total, P_right, P_left, energy) all (M-1,) arrays + scalar [J].
     """
     l = robot_params['l']
-    r = robot_params['r']
     dt = 0.01   # matches ts_des in generate_trajectory
 
-    omega_r = (v_arr + l * omega_arr) / r
-    omega_l = (v_arr - l * omega_arr) / r
-    omega_r_dot = np.gradient(omega_r, dt)
-    omega_l_dot = np.gradient(omega_l, dt)
+    v_r = v_arr + l * omega_arr
+    v_l = v_arr - l * omega_arr
+    a_r = np.gradient(v_r, dt)
+    a_l = np.gradient(v_l, dt)
 
-    def _P(ow, owd, c):
-        raw = (c[0] + c[1] * ow + c[2] * ow**2 + c[3] * ow**3
-               + c[4] * owd + c[5] * owd**2)
+    def _P(v, a, c):
+        raw = (c[0] * a**2 + c[1] * v**2
+               + np.abs(c[2] * a) + np.abs(c[3] * v)
+               + np.abs(c[4] * v * a) + c[5])
         return np.maximum(raw, 0.0)
 
-    P_r = _P(omega_r, omega_r_dot, cr)
-    P_l = _P(omega_l, omega_l_dot, cl)
+    P_r = _P(v_r, a_r, cr)
+    P_l = _P(v_l, a_l, cl)
     P_total = P_r + P_l + p_elec
     energy = float(np.trapz(P_total, dx=dt))
     return P_total, P_r, P_l, energy

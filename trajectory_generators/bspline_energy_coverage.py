@@ -3,27 +3,26 @@
 # @file bspline_energy_coverage.py
 #
 # @brief Energy-aware B-spline OCP for differential drive coverage trajectory
-# generation, driven by the TJ108 physics-based wheel-level power model.
+# generation, driven by a physics-based wheel-level power model.
 #
 # Inherits the full B-spline parameterization, knot vectors, basis matrices,
 # kinodynamic constraint builders, and inverse kinematics from BSplineCoverage.
 # The objective is replaced by a weighted combination of total mission time and
 # total electrical energy consumed, enabling time-energy Pareto trade-offs.
 #
-# TJ108 Power Model (per wheel motor):
-#   P(omega_w, omega_w_dot) = c1
-#                             + c2 * omega_w
-#                             + c3 * omega_w^2
-#                             + c4 * omega_w^3
-#                             + c5 * omega_w_dot
-#                             + c6 * omega_w_dot^2
+# Power Model (per wheel motor):
+#   P(v_w, a_w) = p[0] * a_w^2
+#                + p[1] * v_w^2
+#                + |p[2] * a_w|
+#                + |p[3] * v_w|
+#                + |p[4] * v_w * a_w|
+#                + p[5]
 #
-# State-to-wheel mapping for a differential drive with half-wheelbase l and
-# wheel radius r:
-#   omega_r     = (v + l * Omega) / r
-#   omega_l     = (v - l * Omega) / r
-#   omega_r_dot = (a + l * alpha) / r
-#   omega_l_dot = (a - l * alpha) / r
+# State-to-wheel mapping for a differential drive with half-wheelbase l:
+#   v_r = v + l * Omega      (right wheel linear velocity [m/s])
+#   v_l = v - l * Omega      (left wheel linear velocity [m/s])
+#   a_r = a + l * alpha      (right wheel linear acceleration [m/s²])
+#   a_l = a - l * alpha      (left wheel linear acceleration [m/s²])
 #
 # where v, a are body-frame forward velocity and acceleration (projected along
 # heading), and Omega, alpha are robot angular velocity and acceleration.
@@ -48,44 +47,41 @@ from .bspline_coverage import BSplineCoverage
 
 
 class BSplineEnergyCoverage(BSplineCoverage):
-    """! Energy-aware B-spline OCP using the TJ108 physics-based power model.
+    """! Energy-aware B-spline OCP using a physics-based wheel-level power model.
 
     Extends BSplineCoverage by replacing the time-minimization objective with
     a weighted sum of mission time and total electrical energy. The energy is
     computed by integrating a polynomial motor power model over the trajectory,
-    using wheel-level angular velocities and accelerations derived from the
+    using wheel-level linear velocities and accelerations derived from the
     B-spline derivatives.
 
     The Pareto front between minimum-time and minimum-energy trajectories can
     be explored by sweeping the ratio w_time / w_energy.
     """
 
-    # TJ108 polynomial power coefficients (per motor), identified from bench tests.
-    # Each is a 6-element list [c1, c2, c3, c4, c5, c6] for the model:
-    #   P(omega_w, omega_w_dot) = c1
-    #                           + c2  * omega_w
-    #                           + c3  * omega_w^2
-    #                           + c4  * omega_w^3
-    #                           + c5  * omega_w_dot
-    #                           + c6  * omega_w_dot^2
+    # Polynomial power coefficients (per motor), identified from bench tests.
+    # Each is a 6-element list [p0..p5] for the model:
+    #   P(v_w, a_w) = p[0]*a_w^2 + p[1]*v_w^2
+    #               + |p[2]*a_w| + |p[3]*v_w| + |p[4]*v_w*a_w|
+    #               + p[5]
     # Right and left motors have SEPARATE sets: each physical motor has
     # distinct friction, wear, and inertia characteristics.
     _DEFAULT_ENERGY_COEFFS_RIGHT = [
-        0.302433145557389,       # c1 – static / base load           [W]
-        31.887262598534413,      # c2 – viscous friction (linear)    [W·s/rad]
-        2.4140287888312457,      # c3 – viscous friction (quadratic) [W·s²/rad²]
-        0.9658866923308425,      # c4 – viscous friction (cubic)     [W·s³/rad³]
-        0.8260871406535432,      # c5 – inertial (linear in α)       [W·s²/rad]
-        2.37456174658809e-08,    # c6 – inertial (quadratic in α)    [W·s⁴/rad²]
+        0.302433145557389,       # p[0] – inertial quadratic  a²    [W·s⁴/m²]
+        31.887262598534413,      # p[1] – viscous quadratic   v²    [W·s²/m²]
+        2.4140287888312457,      # p[2] – inertial linear    |a|    [W·s²/m]
+        0.9658866923308425,      # p[3] – viscous linear     |v|    [W·s/m]
+        0.8260871406535432,      # p[4] – cross term       |v·a|    [W·s³/m²]
+        2.37456174658809e-08,    # p[5] – static / base load        [W]
     ]
 
     _DEFAULT_ENERGY_COEFFS_LEFT = [
-        0.33789198669595977,     # c1
-        28.204019732889346,      # c2
-        2.5903002025839688,      # c3
-        0.00847962183165042,     # c4
-        6.412423386896174e-09,   # c5
-        0.3614761744737831,      # c6
+        0.33789198669595977,     # p[0]
+        28.204019732889346,      # p[1]
+        2.5903002025839688,      # p[2]
+        0.00847962183165042,     # p[3]
+        6.412423386896174e-09,   # p[4]
+        0.3614761744737831,      # p[5]
     ]
 
     # Robot physical parameters.
@@ -328,9 +324,9 @@ class BSplineEnergyCoverage(BSplineCoverage):
 
         Computes, in vectorized CasADi form, the robot body-frame forward
         velocity/acceleration and angular velocity/acceleration at every
-        spline sample. Maps these to individual wheel dynamics via the
-        differential-drive kinematic model, then evaluates the TJ108 power
-        polynomial for each wheel. Finally integrates power over time.
+        spline sample. Maps these to individual wheel linear dynamics via the
+        differential-drive kinematic model, then evaluates the polynomial power
+        model for each wheel. Finally integrates power over time.
 
         @param s:   (nt, 3) CasADi MX spline values [x, y, theta].
         @param ds:  (nt, 3) first  B-spline derivatives w.r.t. tau.
@@ -363,22 +359,22 @@ class BSplineEnergyCoverage(BSplineCoverage):
         alpha_robot = dds[:, 2] / T**2                               # [rad/s²]
 
         # --- Wheel-level dynamics --------------------------------------------
-        omega_r, omega_l, omega_r_dot, omega_l_dot = \
+        v_r, v_l, a_r, a_l = \
             self._calculate_wheel_dynamics(
-                v_fwd, omega_robot, a_fwd, alpha_robot, l, r)
+                v_fwd, omega_robot, a_fwd, alpha_robot, l)
 
-        # --- TJ108 motor power per wheel (separate coefficient sets) ---------
-        # cs.fmax floors at zero: TJ108 has no regenerative braking, so
-        # negative power (from large deceleration) must not reduce the energy.
-        P_r = cs.fmax(self._tj108_power(omega_r, omega_r_dot,
-                                        self._e_coeffs_right), 0.0)
-        P_l = cs.fmax(self._tj108_power(omega_l, omega_l_dot,
-                                        self._e_coeffs_left), 0.0)
+        # --- Motor power per wheel (separate coefficient sets) ---------------
+        # cs.fmax floors at zero: the model has no regenerative braking term,
+        # so negative power (from large deceleration) must not reduce energy.
+        P_r = cs.fmax(self._calculate_power(v_r, a_r,
+                                            self._e_coeffs_right), 0.0)
+        P_l = cs.fmax(self._calculate_power(v_l, a_l,
+                                            self._e_coeffs_left), 0.0)
 
         # Hotel load is a constant time-proportional overhead independent of
-        # trajectory shape.  Including it in the objective would make the
-        # indifference point w_e* = ΔT/ΔE_total ≈ 10.4, well outside [0,1].
-        # Optimizing motor energy alone moves w_e* ≈ 0.48, inside the sweep.
+        # trajectory shape.  Including it in the objective shifts the Pareto
+        # indifference point outside [0,1]; optimizing motor energy alone
+        # keeps w_e* inside the sweep range.
         P_motor = P_r + P_l                                          # (nt, 1)
         P_total = P_motor + self._p_elec                             # for output
 
@@ -395,14 +391,14 @@ class BSplineEnergyCoverage(BSplineCoverage):
         return energy_motor, energy, P_total
 
     def _calculate_wheel_dynamics(self, v_fwd, omega_robot,
-                                  a_fwd, alpha_robot, l, r):
-        """! Map robot body-frame kinematics to individual wheel dynamics.
+                                  a_fwd, alpha_robot, l):
+        """! Map robot body-frame kinematics to individual wheel linear dynamics.
 
-        Uses the standard differential-drive inverse kinematic model:
-            omega_r     = (v + l * Omega) / r
-            omega_l     = (v - l * Omega) / r
-            omega_r_dot = (a + l * alpha) / r
-            omega_l_dot = (a - l * alpha) / r
+        Uses the differential-drive inverse kinematic model in linear units:
+            v_r = v + l * Omega      [m/s]
+            v_l = v - l * Omega      [m/s]
+            a_r = a + l * alpha      [m/s²]
+            a_l = a - l * alpha      [m/s²]
 
         All inputs and outputs are CasADi (nt, 1) column vectors.
 
@@ -411,40 +407,39 @@ class BSplineEnergyCoverage(BSplineCoverage):
         @param a_fwd:        Forward acceleration [m/s²].
         @param alpha_robot:  Robot angular acceleration [rad/s²].
         @param l:            Half-wheelbase [m].
-        @param r:            Wheel radius   [m].
-        @return Tuple (omega_r, omega_l, omega_r_dot, omega_l_dot), each (nt,1).
+        @return Tuple (v_r, v_l, a_r, a_l), each (nt,1) [m/s or m/s²].
         """
-        omega_r     = (v_fwd + l * omega_robot) / r
-        omega_l     = (v_fwd - l * omega_robot) / r
-        omega_r_dot = (a_fwd + l * alpha_robot) / r
-        omega_l_dot = (a_fwd - l * alpha_robot) / r
-        return omega_r, omega_l, omega_r_dot, omega_l_dot
+        v_r = v_fwd + l * omega_robot
+        v_l = v_fwd - l * omega_robot
+        a_r = a_fwd + l * alpha_robot
+        a_l = a_fwd - l * alpha_robot
+        return v_r, v_l, a_r, a_l
 
-    def _tj108_power(self, omega_w, omega_w_dot, coeffs):
-        """! TJ108 polynomial power model for one wheel motor.
+    def _calculate_power(self, v_wheel, a_wheel, coeffs):
+        """! Polynomial power model for one wheel motor.
 
-        P(omega_w, omega_w_dot) =
-            c[0]
-          + c[1] * omega_w
-          + c[2] * omega_w^2
-          + c[3] * omega_w^3
-          + c[4] * omega_w_dot
-          + c[5] * omega_w_dot^2
+        P(v_w, a_w) =
+            p[0] * a_w^2
+          + p[1] * v_w^2
+          + |p[2] * a_w|
+          + |p[3] * v_w|
+          + |p[4] * v_w * a_w|
+          + p[5]
 
-        Captures static friction (c[0]), viscous losses (c[1]..c[3]), and
-        the inertial work required for acceleration (c[4]..c[5]).
+        Captures viscous losses (p[1], p[3]), inertial work (p[0], p[2]),
+        a coupled velocity-acceleration term (p[4]), and static load (p[5]).
 
         Right and left motors use separate 6-element coefficient lists
         because each physical motor has distinct friction and inertia.
 
-        @param omega_w:     Wheel angular velocity    [rad/s], CasADi MX.
-        @param omega_w_dot: Wheel angular acceleration [rad/s²], CasADi MX.
-        @param coeffs<list>: 6-element list [c1..c6] for this motor.
+        @param v_wheel:      Wheel linear velocity    [m/s], CasADi MX.
+        @param a_wheel:      Wheel linear acceleration [m/s²], CasADi MX.
+        @param coeffs<list>: 6-element list [p0..p5] for this motor.
         @return CasADi expression for motor power [W], same shape as inputs.
         """
-        return (coeffs[0]
-                + coeffs[1] * omega_w
-                + coeffs[2] * omega_w**2
-                + coeffs[3] * omega_w**3
-                + coeffs[4] * omega_w_dot
-                + coeffs[5] * omega_w_dot**2)
+        return (coeffs[0] * a_wheel**2
+                + coeffs[1] * v_wheel**2
+                + cs.fabs(coeffs[2] * a_wheel)
+                + cs.fabs(coeffs[3] * v_wheel)
+                + cs.fabs(coeffs[4] * v_wheel * a_wheel)
+                + coeffs[5])

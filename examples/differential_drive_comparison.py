@@ -633,23 +633,24 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
 
 
 # =============================================================================
-# POWER COMPUTATION (uniform TJ108 model for all three methods)
+# POWER COMPUTATION (uniform polynomial model for all three methods)
 # =============================================================================
 def _compute_power_uniform(v, omega, dt):
-    """Evaluate TJ108 total electrical power from (v, omega) at sample interval dt."""
-    l, r = ROBOT_PARAMS_BSPLINE['l'], ROBOT_PARAMS_BSPLINE['r']
-    omega_r = (v + l * omega) / r
-    omega_l = (v - l * omega) / r
-    dor = np.gradient(omega_r, dt)
-    dol = np.gradient(omega_l, dt)
+    """Evaluate total electrical power from (v, omega) at sample interval dt."""
+    l = ROBOT_PARAMS_BSPLINE['l']
+    v_r = v + l * omega
+    v_l = v - l * omega
+    a_r = np.gradient(v_r, dt)
+    a_l = np.gradient(v_l, dt)
 
-    def _p(ow, dw, c):
+    def _p(vw, aw, c):
         return np.maximum(
-            c[0] + c[1]*ow + c[2]*ow**2 + c[3]*ow**3
-            + c[4]*dw + c[5]*dw**2, 0.0)
+            c[0]*aw**2 + c[1]*vw**2
+            + np.abs(c[2]*aw) + np.abs(c[3]*vw)
+            + np.abs(c[4]*vw*aw) + c[5], 0.0)
 
-    return (_p(omega_r, dor, ENERGY_COEFFS_RIGHT)
-            + _p(omega_l, dol, ENERGY_COEFFS_LEFT)
+    return (_p(v_r, a_r, ENERGY_COEFFS_RIGHT)
+            + _p(v_l, a_l, ENERGY_COEFFS_LEFT)
             + P_ELECTRONICS)
 
 
