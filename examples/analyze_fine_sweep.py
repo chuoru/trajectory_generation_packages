@@ -44,10 +44,10 @@ PP_FILTER_MULT = 1.5    # drop points where peak_power  > X * median(peak_power)
 TE_FILTER_MULT = 1.5    # drop points where total_energy > X * median(total_energy)
 MT_FILTER_MULT = 5.0    # drop points where mission_time > X * median(mission_time)
 
-COL_TIME   = 'steelblue'
-COL_KNEE   = 'darkorange'
-COL_ENERGY = 'mediumorchid'
-COL_REF    = 'gray'
+STYLE_TIME   = ('black', '-')    # solid
+STYLE_KNEE   = ('red',   '--')   # dashed
+STYLE_ENERGY = ('blue',  '-.')   # dash-dot
+COL_REF      = '#888888'
 
 # Wheel jerk limit [m/s³] — must match J_LIM in differential_drive_path_segment_fine_sweep.py
 J_LIM = 3.547
@@ -186,10 +186,10 @@ def fig_sweep_stats(sw, opt):
     we, pp, te, mt, d2 = sw['we'], sw['pp'], sw['te'], sw['mt'], sw['d2']
 
     panels = [
-        (axes[0, 0], pp, 'o', COL_KNEE,   'Peak Power [W]',    'knee_idx'),
-        (axes[0, 1], te, 's', COL_ENERGY, 'Total Energy [J]',  'energy_idx'),
-        (axes[1, 0], mt, '^', COL_TIME,   'Mission Time [s]',  'time_idx'),
-        (axes[1, 1], d2, 'D', COL_REF,    'd²(P)/d(w_e)²',     'knee_idx'),
+        (axes[0, 0], pp, 'o', STYLE_KNEE[0],   'Peak Power [W]',   'knee_idx'),
+        (axes[0, 1], te, 's', STYLE_ENERGY[0], 'Total Energy [J]', 'energy_idx'),
+        (axes[1, 0], mt, '^', STYLE_TIME[0],   'Mission Time [s]', 'time_idx'),
+        (axes[1, 1], d2, 'D', COL_REF,         'd²(P)/d(w_e)²',    'knee_idx'),
     ]
     for ax, data, marker, color, ylabel, opt_key in panels:
         ax.scatter(we, data, marker=marker, color=color, s=20)
@@ -211,11 +211,12 @@ def fig_pareto(sw, opt):
     sc = ax.scatter(te, pp, c=we, cmap='viridis', s=25, zorder=3)
     plt.colorbar(sc, ax=ax, label='w_energy')
 
-    for key_i, key_we, col, lbl_prefix in [
-        ('time_idx',   'time_we',   COL_TIME,   'Time-opt'),
-        ('knee_idx',   'knee_we',   COL_KNEE,   'Knee'),
-        ('energy_idx', 'energy_we', COL_ENERGY, 'Energy-opt'),
+    for key_i, key_we, style, lbl_prefix in [
+        ('time_idx',   'time_we',   STYLE_TIME,   'Time-opt'),
+        ('knee_idx',   'knee_we',   STYLE_KNEE,   'Knee'),
+        ('energy_idx', 'energy_we', STYLE_ENERGY, 'Energy-opt'),
     ]:
+        col, _ = style
         i = opt[key_i]
         lbl = f'{lbl_prefix}  w_e={opt[key_we]:.4f}'
         ax.scatter([te[i]], [pp[i]], color=col, s=110, zorder=5,
@@ -231,13 +232,14 @@ def fig_pareto(sw, opt):
 
 def fig_corner_velocity(corners, opt):
     fig, ax = plt.subplots(figsize=(9, 4), num='Corner Velocity Profiles')
-    for key_we, col, lbl_prefix in [
-        ('time_we',   COL_TIME,   'Time-opt'),
-        ('knee_we',   COL_KNEE,   'Knee'),
-        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    for key_we, style, lbl_prefix in [
+        ('time_we',   STYLE_TIME,   'Time-opt'),
+        ('knee_we',   STYLE_KNEE,   'Knee'),
+        ('energy_we', STYLE_ENERGY, 'Energy-opt'),
     ]:
+        col, ls = style
         c, actual_we = _nearest_corner(corners, opt[key_we])
-        ax.plot(c['time'], c['v'], lw=1.8, color=col,
+        ax.plot(c['time'], c['v'], lw=1.8, color=col, ls=ls,
                 label=f'{lbl_prefix}  w_e={actual_we:.4f}')
 
     ax.set_xlabel('time [s]', fontsize=12)
@@ -250,13 +252,14 @@ def fig_corner_velocity(corners, opt):
 
 def fig_corner_power(corners, opt):
     fig, ax = plt.subplots(figsize=(9, 4), num='Corner Power Profiles')
-    for key_we, col, lbl_prefix in [
-        ('time_we',   COL_TIME,   'Time-opt'),
-        ('knee_we',   COL_KNEE,   'Knee'),
-        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    for key_we, style, lbl_prefix in [
+        ('time_we',   STYLE_TIME,   'Time-opt'),
+        ('knee_we',   STYLE_KNEE,   'Knee'),
+        ('energy_we', STYLE_ENERGY, 'Energy-opt'),
     ]:
+        col, ls = style
         c, actual_we = _nearest_corner(corners, opt[key_we])
-        ax.plot(c['time'], c['power'], lw=1.8, color=col,
+        ax.plot(c['time'], c['power'], lw=1.8, color=col, ls=ls,
                 label=f'{lbl_prefix}  w_e={actual_we:.4f}')
 
     ax.set_xlabel('time [s]', fontsize=12)
@@ -270,17 +273,18 @@ def fig_corner_power(corners, opt):
 def fig_corner_acceleration(corners, opt):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
                                    num='Corner Acceleration Profiles')
-    for key_we, col, lbl_prefix in [
-        ('time_we',   COL_TIME,   'Time-opt'),
-        ('knee_we',   COL_KNEE,   'Knee'),
-        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    for key_we, style, lbl_prefix in [
+        ('time_we',   STYLE_TIME,   'Time-opt'),
+        ('knee_we',   STYLE_KNEE,   'Knee'),
+        ('energy_we', STYLE_ENERGY, 'Energy-opt'),
     ]:
+        col, ls = style
         c, actual_we = _nearest_corner(corners, opt[key_we])
         a_lin = np.gradient(c['v'],     c['time'])
         a_ang = np.gradient(c['omega'], c['time'])
         lbl = f'{lbl_prefix}  w_e={actual_we:.4f}'
-        ax1.plot(c['time'], a_lin, lw=1.8, color=col, label=lbl)
-        ax2.plot(c['time'], a_ang, lw=1.8, color=col)
+        ax1.plot(c['time'], a_lin, lw=1.8, color=col, ls=ls, label=lbl)
+        ax2.plot(c['time'], a_ang, lw=1.8, color=col, ls=ls)
 
     ax1.set_ylabel('Linear accel. [m/s²]', fontsize=12)
     ax2.set_ylabel('Angular accel. [rad/s²]', fontsize=12)
@@ -300,21 +304,22 @@ def fig_corner_jerk(corners, opt):
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
                                    num='Corner Jerk Profiles')
-    for key_we, col, lbl_prefix in [
-        ('time_we',   COL_TIME,   'Time-opt'),
-        ('knee_we',   COL_KNEE,   'Knee'),
-        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    for key_we, style, lbl_prefix in [
+        ('time_we',   STYLE_TIME,   'Time-opt'),
+        ('knee_we',   STYLE_KNEE,   'Knee'),
+        ('energy_we', STYLE_ENERGY, 'Energy-opt'),
     ]:
+        col, ls = style
         c, actual_we = _nearest_corner(corners, opt[key_we])
         lbl = f'{lbl_prefix}  w_e={actual_we:.4f}'
         if has_wheel_jerk:
-            ax1.plot(c['time'], c['jerk_r'], lw=1.8, color=col, label=lbl)
-            ax2.plot(c['time'], c['jerk_l'], lw=1.8, color=col)
+            ax1.plot(c['time'], c['jerk_r'], lw=1.8, color=col, ls=ls, label=lbl)
+            ax2.plot(c['time'], c['jerk_l'], lw=1.8, color=col, ls=ls)
         else:
             a_lin = np.gradient(c['v'],     c['time'])
             a_ang = np.gradient(c['omega'], c['time'])
-            ax1.plot(c['time'], np.gradient(a_lin, c['time']), lw=1.8, color=col, label=lbl)
-            ax2.plot(c['time'], np.gradient(a_ang, c['time']), lw=1.8, color=col)
+            ax1.plot(c['time'], np.gradient(a_lin, c['time']), lw=1.8, color=col, ls=ls, label=lbl)
+            ax2.plot(c['time'], np.gradient(a_ang, c['time']), lw=1.8, color=col, ls=ls)
 
     for ax in (ax1, ax2):
         ax.axhline( J_LIM, color='red', lw=1.0, ls='--', label=f'±J_LIM={J_LIM:.3f}')
@@ -334,13 +339,14 @@ def fig_corner_jerk(corners, opt):
 def fig_corner_xy(corners, opt):
     fig, ax = plt.subplots(figsize=(6, 6), num='Corner XY Paths')
     ax.set_aspect('equal')
-    for key_we, col, lbl_prefix in [
-        ('time_we',   COL_TIME,   'Time-opt'),
-        ('knee_we',   COL_KNEE,   'Knee'),
-        ('energy_we', COL_ENERGY, 'Energy-opt'),
+    for key_we, style, lbl_prefix in [
+        ('time_we',   STYLE_TIME,   'Time-opt'),
+        ('knee_we',   STYLE_KNEE,   'Knee'),
+        ('energy_we', STYLE_ENERGY, 'Energy-opt'),
     ]:
+        col, ls = style
         c, actual_we = _nearest_corner(corners, opt[key_we])
-        ax.plot(c['x'], c['y'], lw=1.8, color=col,
+        ax.plot(c['x'], c['y'], lw=1.8, color=col, ls=ls,
                 label=f'{lbl_prefix}  w_e={actual_we:.4f}')
 
     ax.set_xlabel('x [m]', fontsize=12)
