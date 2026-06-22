@@ -17,6 +17,10 @@ class PurePursuit:
 
     k = 0.6
 
+    k_i = 0.0
+
+    k_ff = 1.0
+
     # ==================================================================================================
     # PUBLIC METHODS
     # ==================================================================================================
@@ -34,6 +38,8 @@ class PurePursuit:
 
         self._v = 0.0
 
+        self._integral_v = 0.0
+
         self._max_acceleration = 1.0
 
         self._max_angular_acceleration = 4.0
@@ -44,7 +50,9 @@ class PurePursuit:
         """! Initialize the controller
         @note The method is used to initialize the controller.
         """
-        pass
+        self._v = 0.0
+        self._integral_v = 0.0
+        self._w = 0.0
 
     def execute(self, state, input, previous_index):
         """! Execute the controller
@@ -87,9 +95,15 @@ class PurePursuit:
 
         alpha = math.atan2(math.sin(alpha), math.cos(alpha))
 
-        a = self._apply_proportional_control(
-            PurePursuit.k, self.trajectory.u[0, index], self._v
-        )
+        n_pts = len(self.trajectory.u[0])
+        v_ref = self.trajectory.u[0, index]
+        v_next = self.trajectory.u[0, min(index + 1, n_pts - 1)]
+        a_ff = PurePursuit.k_ff * (v_next - v_ref) / self.trajectory.sampling_time
+
+        e_v = v_ref - self._v
+        self._integral_v += e_v * self.trajectory.sampling_time
+        self._integral_v = np.clip(self._integral_v, -1.0, 1.0)
+        a = a_ff + PurePursuit.k * e_v + PurePursuit.k_i * self._integral_v
 
         a = self._max_acceleration if a > self._max_acceleration else a
 

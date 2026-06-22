@@ -27,9 +27,13 @@
 # - Created by Tran Viet Thanh on 2026/05/08
 
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from trajectory_generators.euler_jlap_coverage import EulerJLAPCoverage
 
 # =============================================================================
 # CONFIGURATION  --  edit these before running
@@ -52,6 +56,19 @@ COL_REF      = '#888888'
 # Wheel jerk limit [m/s³] — must match J_LIM in differential_drive_path_segment_fine_sweep.py
 J_LIM = 3.547
 
+# Robot kinematics — must match JLAP_ROBOT_PARAMS in differential_drive_path_segment_fine_sweep.py
+JLAP_DT = 0.05
+JLAP_ROBOT_PARAMS = {
+    'robot_mass':         50.4,
+    'robot_width':        0.510,
+    'wheel_radius':       0.3,
+    'gear_ratio':         40.0,
+    'rated_motor_torque': 1.3,
+    'rated_motor_speed':  3500.0,
+    'motor_inertia':      0.66e-4,
+    'path_vel_lim':       0.5,
+}
+
 
 # =============================================================================
 # DATA LOADING
@@ -73,7 +90,7 @@ def load_corners():
     for p in sorted(corner_dir.glob('corner_we_*.csv')):
         w_e = float(p.stem.replace('corner_we_', ''))
         data = np.loadtxt(p, delimiter=',', skiprows=1)
-        corners[w_e] = {
+        corner = {
             'time':   data[:, 0],
             'x':      data[:, 1],
             'y':      data[:, 2],
@@ -84,7 +101,66 @@ def load_corners():
             'jerk_r': data[:, 7] if data.shape[1] > 7 else None,
             'jerk_l': data[:, 8] if data.shape[1] > 8 else None,
         }
+        corners[w_e] = _stitch_ramps(corner)
     return corners
+
+
+def _stitch_ramps(corner):
+    """Prepend an acceleration ramp (0 → v_h) and append a deceleration ramp
+    (v_h → 0) so the full trajectory starts and ends at rest."""
+    v_h = float(corner['v'][0])
+    if v_h < 1e-3:
+        return corner
+
+    rp = JLAP_ROBOT_PARAMS
+    gr  = rp['gear_ratio']
+    tau = rp['rated_motor_torque']
+    m   = rp['robot_mass']
+    r   = rp['wheel_radius']
+    I   = rp['motor_inertia']
+    rated_torque = gr * tau
+    inertia      = gr**2 * I
+    a_max = 0.5 * rated_torque * r / (0.25 * m * r**2 + inertia)
+    D = max(v_h**2 / a_max * 2.0, 0.3)
+
+    th0 = corner['theta'][0]
+    x0, y0 = corner['x'][0], corner['y'][0]
+    pre = EulerJLAPCoverage(
+        waypoints=[[x0 - D * np.cos(th0), y0 - D * np.sin(th0)], [x0, y0]],
+        sampling_time=JLAP_DT, robot_params=rp,
+        initial_vel=0.0, final_vel=v_h,
+    ).generate_trajectory()
+
+    thf = corner['theta'][-1]
+    xf, yf = corner['x'][-1], corner['y'][-1]
+    post = EulerJLAPCoverage(
+        waypoints=[[xf, yf], [xf + D * np.cos(thf), yf + D * np.sin(thf)]],
+        sampling_time=JLAP_DT, robot_params=rp,
+        initial_vel=v_h, final_vel=0.0,
+    ).generate_trajectory()
+
+    t_c_start   = pre['time'][-1] + JLAP_DT
+    t_post_start = t_c_start + (corner['time'][-1] - corner['time'][0]) + JLAP_DT
+    time_full = np.concatenate([
+        pre['time'],
+        corner['time'] - corner['time'][0] + t_c_start,
+        post['time']   - post['time'][0]   + t_post_start,
+    ])
+    return {
+        'time':   time_full,
+        'x':      np.concatenate([pre['states'][:, 0],  corner['x'],     post['states'][:, 0]]),
+        'y':      np.concatenate([pre['states'][:, 1],  corner['y'],     post['states'][:, 1]]),
+        'theta':  np.concatenate([pre['states'][:, 2],  corner['theta'], post['states'][:, 2]]),
+        'v':      np.concatenate([pre['v'],              corner['v'],     post['v']]),
+        'omega':  np.concatenate([pre['omega'],          corner['omega'], post['omega']]),
+        'power':  np.concatenate([
+            np.zeros(len(pre['time'])),
+            corner['power'],
+            np.zeros(len(post['time'])),
+        ]),
+        'jerk_r': None,
+        'jerk_l': None,
+    }
 
 
 # =============================================================================
