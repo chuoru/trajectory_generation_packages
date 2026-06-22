@@ -6,8 +6,8 @@
 # differential drive robot navigating an L-shaped path.
 #
 # Runs two solvers on the same waypoints:
-#   (A) BSplineEnergyCoverage (w_energy=0) - minimizes total traversal time
-#   (B) BSplineEnergyCoverage             - minimizes w_time * T + w_energy * E_total
+#   (A) BSplineEnergyCoverage (w_energy=0) - minimises total traversal time
+#   (B) BSplineEnergyCoverage             - minimises w_time * T + w_energy * E_total
 #
 # Text output — full comparison table (12 metrics, time-opt vs energy-aware).
 #
@@ -19,12 +19,11 @@
 #   Figure 3 — TJ108 Energy Analysis
 #               P(t) per motor, wheel angular velocities,
 #               energy bar comparison, energy density map
-#   Figure 4 — Time–Energy Pareto Front
-#               Sweep of w_time / w_energy with E/m as marker color
-#   Figure 5–7 — Dense w_energy sweep analysis (peak power, energy, time,
-#                trajectory overlay, kinematic & power profiles)
 #   Figure 8 — Per-wheel angular velocity, acceleration, and jerk
 #               (time-optimal vs energy-aware, right/left wheel overlay)
+#
+# For the dense w_energy sweep analysis (Pareto front, peak-power suppression,
+# trajectory overlay), see differential_drive_bspline_energy_sweep.py.
 #
 # @section author_doxygen_example Author(s)
 # - Created by Tran Viet Thanh on 2026/04/16
@@ -41,7 +40,6 @@ from matplotlib.collections import PatchCollection
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # Internal library
-from trajectory_generators.bspline_coverage import BSplineCoverage
 from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
 
 
@@ -52,6 +50,11 @@ from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
 SAVE_FIGS   = True
 FIG_OUT_DIR = (pathlib.Path(__file__).resolve().parent.parent.parent
                / 'Writting' / 'energy_aware')
+
+# w_energy weight used for the energy-aware run (Run B).
+# ~0.22 balances the energy/time gradient ratio for this problem
+# (E_motor/nt ≈ 1.4, T_mission/nt ≈ 0.31 → ratio ≈ 4.5 → w_e* ≈ 1/4.5).
+W_ENERGY = 0.22
 
 
 def _savefig(fig, filename):
@@ -76,7 +79,7 @@ COMMON_KWARGS = dict(
     bound=0.17,
     n_ctrl_pts=6,
     spline_order=3,
-    n_sampling=30,
+    n_sampling=15,
     vel_max=[0.75, 0.75, 0.196],
     vel_min_lin=0.001,
     eps_nonh=0.001,
@@ -350,17 +353,9 @@ def _print_comparison(mA, mB):
 def main():
     _set_paper_style()
 
-    # --- Step 1: sweep to find the optimal w_energy --------------------------
+    # --- Run A: time-optimal --------------------------------------------------
     print("=" * 60)
-    print("Step 1: w_energy sweep to identify optimal trade-off point")
-    print("=" * 60)
-    opt_we = _fig5_we_sweep()   # produces Figures 5, 6, 7 and returns opt_we
-
-    # --- Step 2: Run A — time-optimal ----------------------------------------
-    # Use BSplineEnergyCoverage(w_energy=0) so res_time['energy'] is computed
-    # by the same B-spline-derivative formula as Run B — consistent metric.
-    print("=" * 60)
-    print("Step 2 — Run A: time-optimal (w_time=1.0, w_energy=0.0)")
+    print("Run A: time-optimal  (w_time=1.0, w_energy=0.0)")
     print("=" * 60)
     gen_time = BSplineEnergyCoverage(
         waypoints=WAYPOINTS,
@@ -374,10 +369,10 @@ def main():
     )
     res_time = gen_time.generate_trajectory()
 
-    # --- Step 3: Run B — energy-aware at the sweep-identified optimum ---------
+    # --- Run B: energy-aware (warm-started from Run A) ------------------------
     print()
     print("=" * 60)
-    print(f"Step 3 — Run B: energy-aware  (w_time=1.0, w_energy={opt_we:.4f})")
+    print(f"Run B: energy-aware  (w_time=1.0, w_energy={W_ENERGY})")
     print("=" * 60)
     gen_energy = BSplineEnergyCoverage(
         waypoints=WAYPOINTS,
@@ -385,13 +380,13 @@ def main():
         energy_coeffs_right=ENERGY_COEFFS_RIGHT,
         energy_coeffs_left=ENERGY_COEFFS_LEFT,
         w_time=1.0,
-        w_energy=opt_we,
+        w_energy=W_ENERGY,
         p_electronics=P_ELECTRONICS,
         **COMMON_KWARGS,
     )
-    res_energy = gen_energy.generate_trajectory()
+    res_energy = gen_energy.generate_trajectory(warm_start=res_time)
 
-    # Compute full metrics for both
+    # Compute full metrics for both runs
     mA = _compute_metrics(res_time,   ROBOT_PARAMS,
                           ENERGY_COEFFS_RIGHT, ENERGY_COEFFS_LEFT, P_ELECTRONICS)
     mB = _compute_metrics(res_energy, ROBOT_PARAMS,
@@ -399,11 +394,9 @@ def main():
 
     _print_comparison(mA, mB)
 
-    # Figures 1–4: comparison at the sweep-identified optimal w_energy
     _fig1_trajectories(res_time, res_energy, mA, mB)
     _fig2_kinematic_profiles(mA, mB)
     _fig3_energy_analysis(res_time, res_energy, mA, mB)
-    _fig4_pareto()
     _fig8_wheel_kinematics(res_time, res_energy)
 
     plt.show()
@@ -617,423 +610,6 @@ def _fig3_energy_analysis(res_time, res_energy, mA, mB):
     ax_map.legend(fontsize=8)
 
     fig.suptitle('Figure 3 — TJ108 Energy Analysis', fontsize=12)
-
-
-# =============================================================================
-# Figure 4 — Time–Energy Pareto Front
-# =============================================================================
-def _fig4_pareto():
-    """Sweep w_energy / w_time to trace the Pareto front.
-
-    Each marker is coloured by energy-per-meter efficiency [J/m].
-    This runs multiple IPOPT solves — comment out the call in main() if needed.
-    """
-    weights = [
-        (1.0, 0.00),
-        (1.0, 0.10),
-        (1.0, 0.25),
-        (1.0, 0.50),
-        (1.0, 1.00),
-        (0.5, 1.00),
-        (0.1, 1.00),
-        (0.0, 1.00),
-    ]
-
-    times, energies, eff = [], [], []
-
-    print()
-    print("=" * 60)
-    print("Figure 4: Pareto sweep  (8 IPOPT solves) …")
-    print("=" * 60)
-
-    prev_res = None
-    for w_t, w_e in weights:
-        # Always use BSplineEnergyCoverage so that res['energy'] is computed
-        # by the same B-spline-derivative formula for every point.
-        # Continuation warm-start: seed each solve from the previous solution
-        # so IPOPT traces the Pareto branch smoothly instead of jumping to a
-        # different local minimum.
-        gen = BSplineEnergyCoverage(
-            waypoints=WAYPOINTS,
-            robot_params=ROBOT_PARAMS,
-            energy_coeffs_right=ENERGY_COEFFS_RIGHT,
-            energy_coeffs_left=ENERGY_COEFFS_LEFT,
-            w_time=w_t, w_energy=w_e,
-            p_electronics=P_ELECTRONICS,
-            **COMMON_KWARGS,
-        )
-        res      = gen.generate_trajectory(warm_start=prev_res)
-        prev_res = res
-        energy   = float(res['energy'])
-        T_total = float(res['time'][-1])
-
-        # Path length
-        st = res['states']
-        path_len = float(np.sum(np.sqrt(np.diff(st[:, 0])**2
-                                        + np.diff(st[:, 1])**2)))
-        e_per_m = energy / path_len if path_len > 0 else float('inf')
-
-        times.append(T_total)
-        energies.append(energy)
-        eff.append(e_per_m)
-        print(f"  solving ({w_t:.2f}, {w_e:.2f})  done  →  "
-              f"T={T_total:.3f} s,  E={energy:.3f} J,  "
-              f"E/m={e_per_m:.3f} J/m")
-
-    # --- Summary table -------------------------------------------------------
-    print()
-    print("Pareto front summary")
-    hdr = (f"  {'w_time':>6}  {'w_energy':>8}  "
-           f"{'Time [s]':>10}  {'Energy [J]':>10}  "
-           f"{'E/meter [J/m]':>14}  {'Avg P [W]':>10}")
-    print(hdr)
-    print("  " + "─" * 66)
-
-    for i, (w_t, w_e) in enumerate(weights):
-        dt_approx = times[i]
-        avg_p = energies[i] / dt_approx if dt_approx > 0 else float('nan')
-        print(f"  {w_t:>6.2f}  {w_e:>8.2f}  "
-              f"{times[i]:>10.3f}  {energies[i]:>10.3f}  "
-              f"{eff[i]:>14.4f}  {avg_p:>10.3f}")
-    print()
-
-    fig, ax = plt.subplots(figsize=(7, 5),
-                           num='Figure 4 — Time–Energy Pareto Front')
-
-    sc = ax.scatter(times, energies, c=eff, cmap='viridis_r',
-                    s=90, zorder=5)
-    ax.plot(times, energies, '-', color='gray', linewidth=1.2,
-            zorder=4, alpha=0.6)
-
-    cb = fig.colorbar(sc, ax=ax)
-    cb.set_label('Energy / meter [J/m]')
-
-    for i, (w_t, w_e) in enumerate(weights):
-        ax.annotate(f'({w_t:.1f},{w_e:.1f})',
-                    (times[i], energies[i]),
-                    textcoords='offset points', xytext=(6, 4), fontsize=7)
-
-    ax.set_xlabel('Total mission time [s]')
-    ax.set_ylabel('Total energy [J]')
-    ax.set_title('Figure 4 — Time–Energy Pareto Front\n'
-                 'Marker colour = energy efficiency [J/m]')
-    fig.tight_layout()
-    _savefig(fig, 'fig_bspline_pareto.png')
-
-
-# =============================================================================
-# Figure 5 — Dense w_energy Sweep: Peak Power Suppression & Optimal Trade-off
-# =============================================================================
-def _fig5_we_sweep():
-    """Sweep w_energy over [0, 0.001 … 1.0] log-spaced (w_time fixed at 1.0).
-
-    Log spacing is chosen because the objective balance point is
-        w_e* = T_mission / E_total ≈ 0.026
-    Linear spacing wastes resolution far from this point.  25 log-spaced
-    decades from 1e-3 to 1.0 plus the w_e=0 anchor give 26 solves that
-    cover the full Pareto front in one pass.
-
-    Records Peak Power, Total Energy, and Mission Time for each solve.
-    Computes the second derivative of the Peak Power suppression curve and
-    identifies the w_energy where it is minimised — the elbow of the curve
-    where further energy weighting yields diminishing returns on peak power.
-    """
-    we_values = np.concatenate([[0.0], np.logspace(-3, 0, 25)])
-
-    # Tighter corner tolerance: halve the corridor bound so the spline must
-    # stay closer to the reference path around corners.
-    sweep_kwargs = {**COMMON_KWARGS, 'bound': 0.17}
-
-    peak_powers    = []
-    total_energies = []
-    mission_times  = []
-    all_states     = []
-    all_time_traj  = []
-    all_time_ik    = []
-    all_v          = []
-    all_omega      = []
-    all_P_tot      = []
-    all_P_r        = []
-    all_P_l        = []
-
-    print()
-    print("=" * 60)
-    print(f"Figure 5: Log-spaced w_energy sweep  ({len(we_values)} IPOPT solves, "
-          f"w_e in [0, 1e-3 … 1.0]) …")
-    print("=" * 60)
-    print(f"  {'w_e':>10}  {'Time [s]':>10}  {'Energy [J]':>10}  "
-          f"{'Peak P [W]':>10}")
-    print("  " + "─" * 49)
-
-    prev_res = None
-    for w_e in we_values:
-        gen = BSplineEnergyCoverage(
-            waypoints=WAYPOINTS,
-            robot_params=ROBOT_PARAMS,
-            energy_coeffs_right=ENERGY_COEFFS_RIGHT,
-            energy_coeffs_left=ENERGY_COEFFS_LEFT,
-            w_time=1.0, w_energy=float(w_e),
-            p_electronics=P_ELECTRONICS,
-            **sweep_kwargs,
-        )
-        res      = gen.generate_trajectory(warm_start=prev_res)
-        prev_res = res
-        P_tot, P_r, P_l, _ = _compute_wheel_power(
-            res['v'], res['omega'],
-            ROBOT_PARAMS, ENERGY_COEFFS_RIGHT, ENERGY_COEFFS_LEFT,
-            P_ELECTRONICS)
-        T_total = float(res['time'][-1])
-        peak_p  = float(np.max(P_tot))
-        energy  = float(res['energy'])   # consistent optimizer metric
-
-        peak_powers.append(peak_p)
-        total_energies.append(energy)
-        mission_times.append(T_total)
-        all_states.append(res['states'])
-        all_time_traj.append(res['time'])
-        all_time_ik.append(res['time_ik'])
-        all_v.append(res['v'])
-        all_omega.append(res['omega'])
-        all_P_tot.append(P_tot)
-        all_P_r.append(P_r)
-        all_P_l.append(P_l)
-        print(f"  {w_e:>10.6f}  {T_total:>10.3f}  {energy:>10.3f}  {peak_p:>10.3f}")
-
-    peak_powers    = np.array(peak_powers)
-    total_energies = np.array(total_energies)
-    mission_times  = np.array(mission_times)
-
-    # --- Second derivative of Peak Power curve w.r.t. w_energy ---------------
-    # Pass the non-uniform we_values array so np.gradient uses variable spacing.
-    d1_pp = np.gradient(peak_powers, we_values)
-    d2_pp = np.gradient(d1_pp,       we_values)
-
-    # Optimal trade-off: w_energy where d2_pp is most negative (maximum concavity)
-    opt_idx = int(np.argmin(d2_pp))
-    opt_we  = float(we_values[opt_idx])
-
-    print()
-    print(f"  Optimal trade-off point: w_energy = {opt_we:.2f}  "
-          f"(d²P/dwe² = {d2_pp[opt_idx]:.4f})")
-    print(f"    → Peak Power  = {peak_powers[opt_idx]:.3f} W")
-    print(f"    → Total Energy = {total_energies[opt_idx]:.3f} J")
-    print(f"    → Mission Time = {mission_times[opt_idx]:.3f} s")
-    print()
-
-    # --- Plot -----------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8),
-                             num='Figure 5 — w_energy Sweep')
-    fig.suptitle('Figure 5 — Dense w_energy Sweep  (w_time = 1.0)',
-                 fontsize=13)
-
-    # Panel (0,0): Peak Power vs w_energy
-    ax = axes[0, 0]
-    ax.plot(we_values, peak_powers, 'o-', color='tomato', linewidth=1.8,
-            markersize=4, label='Peak Power')
-    ax.axvline(opt_we, color='black', linestyle='--', linewidth=1.2,
-               label=f'Optimal w_e = {opt_we:.4f}')
-    ax.scatter([opt_we], [peak_powers[opt_idx]], color='black', s=80, zorder=6)
-    ax.set_xlabel('w_energy (log scale)')
-    ax.set_ylabel('Peak Power [W]')
-    ax.set_title('Peak Power Suppression')
-    ax.set_xscale('log')
-    ax.legend(fontsize=8)
-
-    # Panel (0,1): Total Energy vs w_energy
-    ax = axes[0, 1]
-    ax.plot(we_values, total_energies, 's-', color='steelblue', linewidth=1.8,
-            markersize=4, label='Total Energy')
-    ax.axvline(opt_we, color='black', linestyle='--', linewidth=1.2,
-               label=f'Optimal w_e = {opt_we:.4f}')
-    ax.scatter([opt_we], [total_energies[opt_idx]], color='black', s=80, zorder=6)
-    ax.set_xlabel('w_energy (log scale)')
-    ax.set_ylabel('Total Energy [J]')
-    ax.set_title('Total Energy vs w_energy')
-    ax.set_xscale('log')
-    ax.legend(fontsize=8)
-
-    # Panel (1,0): Mission Time vs w_energy
-    ax = axes[1, 0]
-    ax.plot(we_values, mission_times, '^-', color='seagreen', linewidth=1.8,
-            markersize=4, label='Mission Time')
-    ax.axvline(opt_we, color='black', linestyle='--', linewidth=1.2,
-               label=f'Optimal w_e = {opt_we:.4f}')
-    ax.scatter([opt_we], [mission_times[opt_idx]], color='black', s=80, zorder=6)
-    ax.set_xlabel('w_energy (log scale)')
-    ax.set_ylabel('Mission Time [s]')
-    ax.set_title('Mission Time vs w_energy')
-    ax.set_xscale('log')
-    ax.legend(fontsize=8)
-
-    # Panel (1,1): Second derivative of Peak Power curve
-    ax = axes[1, 1]
-    ax.plot(we_values, d2_pp, 'D-', color='darkorange', linewidth=1.8,
-            markersize=4, label='d²(Peak P)/d(w_e)²')
-    ax.axvline(opt_we, color='black', linestyle='--', linewidth=1.2,
-               label=f'min d² at w_e = {opt_we:.4f}')
-    ax.scatter([opt_we], [d2_pp[opt_idx]], color='black', s=80, zorder=6)
-    ax.axhline(0, color='gray', linewidth=0.8, linestyle=':')
-    ax.set_xlabel('w_energy (log scale)')
-    ax.set_ylabel('d²(Peak P) / d(w_e)²  [W]')
-    ax.set_title('2nd Derivative — Optimal Trade-off Detection')
-    ax.set_xscale('log')
-    ax.legend(fontsize=8)
-
-    fig.tight_layout()
-
-    _fig6_sweep_trajectories(we_values, all_states, all_time_traj, opt_idx)
-    _fig7_sweep_profiles(we_values, all_time_ik, all_v, all_omega,
-                         all_P_tot, all_P_r, all_P_l, opt_idx)
-
-    return opt_we
-
-
-# =============================================================================
-# Figure 6 — Sweep: XY Trajectory Overlay + Heading Profile
-# =============================================================================
-def _fig6_sweep_trajectories(we_values, all_states, all_time_traj, opt_idx):
-    """XY trajectory overlay and heading-angle profiles across the sweep."""
-    cmap = plt.cm.viridis
-    norm = plt.Normalize(vmin=float(we_values[0]), vmax=float(we_values[-1]))
-    wps  = np.array(WAYPOINTS)
-    opt_we = float(we_values[opt_idx])
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5),
-                             num='Figure 6 — Sweep Trajectories')
-    fig.suptitle('Figure 6 — Trajectory Overlay Across w_energy Sweep  '
-                 '(w_time = 1.0,  bound = 0.08 m)', fontsize=12)
-
-    # --- Panel (0): XY overlay with polyhedra corridors ----------------------
-    ax = axes[0]
-    ax.set_aspect('equal')
-
-    _draw_polyhedra_corridors(ax, WAYPOINTS, COMMON_KWARGS['bound'])
-
-    ax.plot(wps[:, 0], wps[:, 1], '--', color='gray', linewidth=1.5,
-            zorder=2, label='Reference path')
-
-    for i, (w_e, states) in enumerate(zip(we_values, all_states)):
-        is_opt = (i == opt_idx)
-        ax.plot(states[:, 0], states[:, 1], '-',
-                color=cmap(norm(w_e)),
-                linewidth=2.5 if is_opt else 0.9,
-                alpha=1.0 if is_opt else 0.5,
-                zorder=5 if is_opt else 3)
-
-    # Re-draw optimal on top with a named line for the legend
-    ax.plot(all_states[opt_idx][:, 0], all_states[opt_idx][:, 1], '-',
-            color='red', linewidth=2.5, zorder=6,
-            label=f'Optimal  w_e = {opt_we:.3f}')
-    ax.plot(wps[:, 0], wps[:, 1], 'o', color='limegreen',
-            markersize=8, zorder=7, label='Waypoints')
-
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    fig.colorbar(sm, ax=ax, label='w_energy')
-    ax.set_xlabel('x [m]')
-    ax.set_ylabel('y [m]')
-    ax.set_title('XY Trajectory Overlay')
-    ax.legend(fontsize=8)
-
-    # --- Panel (1): Heading angle θ(t) ----------------------------------------
-    ax = axes[1]
-    for i, (w_e, states, t_traj) in enumerate(
-            zip(we_values, all_states, all_time_traj)):
-        is_opt = (i == opt_idx)
-        ax.plot(t_traj, np.rad2deg(states[:, 2]), '-',
-                color=cmap(norm(w_e)),
-                linewidth=2.5 if is_opt else 0.9,
-                alpha=1.0 if is_opt else 0.5,
-                zorder=5 if is_opt else 3)
-
-    ax.plot(all_time_traj[opt_idx],
-            np.rad2deg(all_states[opt_idx][:, 2]),
-            '-', color='red', linewidth=2.5, zorder=6,
-            label=f'Optimal  w_e = {opt_we:.3f}')
-
-    sm2 = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm2.set_array([])
-    fig.colorbar(sm2, ax=ax, label='w_energy')
-    ax.set_xlabel('Time [s]')
-    ax.set_ylabel('Heading θ [deg]')
-    ax.set_title('Heading Angle vs Time')
-    ax.legend(fontsize=8)
-
-    fig.tight_layout()
-
-
-# =============================================================================
-# Figure 7 — Sweep: Kinematic & Power Profile Overlay
-# =============================================================================
-def _fig7_sweep_profiles(we_values, all_time_ik, all_v, all_omega,
-                          all_P_tot, all_P_r, all_P_l, opt_idx):
-    """Forward velocity, angular velocity, power, and cumulative energy
-    profiles overlaid for every w_energy in the sweep."""
-    cmap = plt.cm.viridis
-    norm = plt.Normalize(vmin=float(we_values[0]), vmax=float(we_values[-1]))
-    opt_we = float(we_values[opt_idx])
-
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9),
-                             num='Figure 7 — Sweep Kinematic & Power Profiles')
-    fig.suptitle('Figure 7 — Kinematic & Power Profiles Across w_energy Sweep  '
-                 '(w_time = 1.0)', fontsize=12)
-
-    ax_v, ax_w, ax_p, ax_e = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
-
-    for i, (w_e, t_ik, v, omega, P_tot, P_r, P_l) in enumerate(
-            zip(we_values, all_time_ik, all_v, all_omega,
-                all_P_tot, all_P_r, all_P_l)):
-        color  = cmap(norm(w_e))
-        is_opt = (i == opt_idx)
-        lw     = 2.0 if is_opt else 0.8
-        alpha  = 1.0 if is_opt else 0.45
-        zo     = 5 if is_opt else 3
-
-        E_cum = np.cumsum(P_tot) * 0.01   # dt = 0.01 s
-        ax_v.plot(t_ik, v,     '-', color=color, lw=lw, alpha=alpha, zorder=zo)
-        ax_w.plot(t_ik, omega, '-', color=color, lw=lw, alpha=alpha, zorder=zo)
-        ax_p.plot(t_ik, P_tot, '-', color=color, lw=lw, alpha=alpha, zorder=zo)
-        ax_e.plot(t_ik, E_cum, '-', color=color, lw=lw, alpha=alpha, zorder=zo)
-
-    # Optimal overlay with label + per-motor breakdown on power panel
-    t_opt   = all_time_ik[opt_idx]
-    v_opt   = all_v[opt_idx]
-    w_opt   = all_omega[opt_idx]
-    P_opt   = all_P_tot[opt_idx]
-    Pr_opt  = all_P_r[opt_idx]
-    Pl_opt  = all_P_l[opt_idx]
-    E_opt   = np.cumsum(P_opt) * 0.01
-
-    lbl = f'Optimal  w_e = {opt_we:.3f}'
-    ax_v.plot(t_opt, v_opt, '-', color='red', lw=2.5, zorder=6, label=lbl)
-    ax_w.plot(t_opt, w_opt, '-', color='red', lw=2.5, zorder=6, label=lbl)
-    ax_p.plot(t_opt, P_opt, '-', color='red', lw=2.5, zorder=6, label=lbl)
-    ax_p.plot(t_opt, Pr_opt, '--', color='red', lw=1.4, zorder=6,
-              label='P_right (optimal)')
-    ax_p.plot(t_opt, Pl_opt, ':',  color='red', lw=1.4, zorder=6,
-              label='P_left  (optimal)')
-    ax_e.plot(t_opt, E_opt, '-', color='red', lw=2.5, zorder=6, label=lbl)
-
-    # Axis labels, titles, grid
-    ax_v.set(xlabel='Time [s]', ylabel='v [m/s]',
-             title='Forward Velocity v(t)')
-    ax_w.set(xlabel='Time [s]', ylabel='ω [rad/s]',
-             title='Angular Velocity ω(t)')
-    ax_p.set(xlabel='Time [s]', ylabel='P [W]',
-             title='Total Electrical Power P(t)')
-    ax_e.set(xlabel='Time [s]', ylabel='E [J]',
-             title='Cumulative Energy E(t)')
-
-    for ax in axes.flat:
-        ax.legend(fontsize=7)
-
-    # One shared colorbar per figure column pair
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    fig.colorbar(sm, ax=axes.ravel().tolist(), label='w_energy',
-                 fraction=0.02, pad=0.04)
-
-    fig.tight_layout()
 
 
 # =============================================================================

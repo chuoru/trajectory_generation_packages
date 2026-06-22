@@ -105,11 +105,11 @@ class BSplineCoverage:
             'ipopt',
             {'print_time': False},
             {
-                'max_iter': 5000,
+                'max_iter': 10000,
                 'print_level': 3,
                 'tol': 1e-5,
-                'acceptable_tol': 1e-3,
-                'acceptable_iter': 20,
+                'acceptable_tol': 5e-3,
+                'acceptable_iter': 15,
                 'constr_viol_tol': 1e-4,
                 'hessian_approximation': 'limited-memory',
             }

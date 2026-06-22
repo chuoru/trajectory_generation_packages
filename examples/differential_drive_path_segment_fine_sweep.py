@@ -126,7 +126,7 @@ def _make_bspline_common(v_h):
         bound=0.25,
         n_ctrl_pts=6,
         spline_order=3,
-        n_sampling=20,
+        n_sampling=15,
         vel_max=[v_h, v_h, 0.196],
         vel_min_lin=0.01,
         eps_nonh=0.005,
