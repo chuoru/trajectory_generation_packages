@@ -377,15 +377,26 @@ def main():
     _print_comparison(mA, mB)
 
     # ------------------------------------------------------------------
-    # Step 2b: EulerJLAP -- segment 2 (corner exit -> end)
+    # Step 2b: EulerJLAP -- segment 2 (tractor corner exit -> tractor end)
     # ------------------------------------------------------------------
+    # After the corner (gamma_exit=0) the tractor is aligned with the trailer
+    # and offset by (LF + LB) in HEADING_OUT.  JLAP plans the TRACTOR path.
+    _st_exit = res_corner_opt['states'][-1:]
+    _xt_exit, _yt_exit = tractor_xy(_st_exit)
+    wp_s2_start = [float(_xt_exit[0]), float(_yt_exit[0])]
+    wp_s2_end   = [
+        WP_END[0] + (LF + LB) * np.cos(HEADING_OUT),
+        WP_END[1] + (LF + LB) * np.sin(HEADING_OUT),
+    ]
     v_corner_exit = float(max(0.0, res_corner_opt['v'][-1]))
     print()
     print("=" * 60)
-    print(f"Step 2b: EulerJLAPCoverage - segment 2 "
+    print(f"Step 2b: EulerJLAPCoverage - segment 2 (tractor) "
           f"(V_entry={v_corner_exit:.3f} -> 0)")
+    print(f"  start = ({wp_s2_start[0]:.3f}, {wp_s2_start[1]:.3f})  "
+          f"end = ({wp_s2_end[0]:.3f}, {wp_s2_end[1]:.3f})")
     print("=" * 60)
-    res_s2 = _run_jlap_seg(arc_exit_ext.tolist(), WP_END,
+    res_s2 = _run_jlap_seg(wp_s2_start, wp_s2_end,
                             initial_vel=v_corner_exit, final_vel=0.0)
     print(f"  T = {res_s2['time'][-1]:.3f} s   "
           f"v_entry = {v_corner_exit:.3f} m/s")
@@ -454,7 +465,7 @@ def _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt):
     ax.plot(sc[:, 0], sc[:, 1], '-', color=COL_C_B, lw=2.0,
             label='Corner (B-spline energy-opt, trailer)', zorder=4)
     ax.plot(s2[:, 0], s2[:, 1], '-', color=COL_S2, lw=2.0,
-            label='Segment 2 (JLAP, trailer)', zorder=4)
+            label='Segment 2 (JLAP, tractor)', zorder=4)
 
     # Tractor path for corner
     xt_c, yt_c = tractor_xy(sc)
@@ -686,7 +697,7 @@ def _fig4_stitched_trajectory(res_s1, res_s2, res_corner_time, res_corner_opt):
     ax.plot(xt_c, yt_c, '--', color=COL_C_B, lw=1.5, alpha=0.7,
             label='Corner (tractor)', zorder=4)
     ax.plot(s2[:, 0], s2[:, 1], '-', color=COL_S2, lw=2.0,
-            label='Segment 2 (JLAP)', zorder=4)
+            label='Segment 2 (JLAP, tractor)', zorder=4)
     ae, ax_e = res_s1['states'][-1, :2], res_s2['states'][0, :2]
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
