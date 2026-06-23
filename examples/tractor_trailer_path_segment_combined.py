@@ -21,6 +21,7 @@
 #   Figure 2 -- JLAP kinematic profiles for both straight segments
 #   Figure 3 -- Corner comparison: time-opt vs energy-opt (XY + power + hitch)
 #   Figure 4 -- Full stitched trajectory (XY + velocity + hitch angle)
+#   Figure 5 -- PurePursuit closed-loop tracking of tractor reference path
 #
 # @section author_doxygen_example Author(s)
 # - Created by Tran Viet Thanh on 2026/06/23
@@ -38,6 +39,10 @@ from trajectory_generators.euler_jlap_coverage import EulerJLAPCoverage
 from trajectory_generators.bspline_energy_tractor_trailer_coverage import (
     BSplineEnergyTractorTrailerCoverage,
 )
+from models.differential_drive import DifferentialDrive
+from simulators.time_stepping import TimeStepping
+from controllers.purepursuit import PurePursuit
+from controllers.trajectory import Trajectory
 
 
 # =============================================================================
@@ -81,6 +86,7 @@ L_WHEELBASE = 0.35         # [m] -- used only for PathSegment radius estimate
 LB        = 0.2            # tractor rear axle -> hitch [m]
 LF        = 0.8            # hitch -> trailer rear axle [m]
 GAMMA_MAX = 0.785          # hitch angle limit [rad]
+TRACTOR_WHEEL_BASE = 0.35  # 2 * robot_params['l'] = 2 * 0.175 [m]
 
 # EulerJLAP robot params -- NewMiniAGV motor model, path_vel_lim capped at TT vel_max.
 JLAP_ROBOT_PARAMS = {
@@ -402,12 +408,28 @@ def main():
           f"v_entry = {v_corner_exit:.3f} m/s")
 
     # ------------------------------------------------------------------
+    # Step 4: PurePursuit closed-loop tracking (tractor reference)
+    # ------------------------------------------------------------------
+    print()
+    print("=" * 60)
+    print("Step 4: PurePursuit - closed-loop tracking (energy-opt corner)")
+    print("=" * 60)
+    ref_traj = _build_reference_trajectory(res_s1, res_s2, res_corner_opt)
+    sim_pp   = _run_purepursuit(ref_traj)
+    trk_end  = sim_pp.x_out[:2, -1]
+    ref_end  = ref_traj.x[-1, :2]
+    print(f"  Reference waypoints : {len(ref_traj.x)}")
+    print(f"  Simulation steps    : {sim_pp.x_out.shape[1]}")
+    print(f"  Final position error: {np.hypot(*(trk_end - ref_end)) * 1e3:.1f} mm")
+
+    # ------------------------------------------------------------------
     # Figures
     # ------------------------------------------------------------------
     _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt)
     _fig2_jlap_profiles(res_s1, res_s2)
     _fig3_corner_comparison(seg_info, res_corner_time, res_corner_opt, mA, mB)
     _fig4_stitched_trajectory(res_s1, res_s2, res_corner_time, res_corner_opt)
+    _fig5_purepursuit(ref_traj, sim_pp)
 
     plt.show()
     plt.close('all')
@@ -741,6 +763,123 @@ def _fig4_stitched_trajectory(res_s1, res_s2, res_corner_time, res_corner_opt):
 
     fig.tight_layout()
     _savefig(fig, 'tt_fig_stitched.png')
+
+
+# =============================================================================
+# PURE PURSUIT TRACKING
+# =============================================================================
+def _build_reference_trajectory(res_s1, res_s2, res_corner_opt, dt=0.05):
+    """Stitch segments into a uniform-dt TRACTOR reference trajectory.
+
+    Segment 1 (JLAP, trailer path) is offset by (LF+LB) in HEADING_IN so
+    the tractor trajectory is continuous at all segment junctions.
+    Tractor heading = theta_trailer - gamma (derived from the hitch angle).
+    """
+    T1    = float(res_s1['time'][-1])
+    t_ocp = res_corner_opt['time']
+    t_ik  = res_corner_opt['time_ik']
+    sc    = res_corner_opt['states']
+    Tc    = float(t_ocp[-1])
+
+    # S1: tractor offset from trailer by (LF+LB) in HEADING_IN direction
+    off_x = (LF + LB) * np.cos(HEADING_IN)
+    off_y = (LF + LB) * np.sin(HEADING_IN)
+    s1_x  = res_s1['states'][:, 0] + off_x
+    s1_y  = res_s1['states'][:, 1] + off_y
+    s1_th = res_s1['states'][:, 2]
+
+    # Corner: tractor XY + heading interpolated onto IK grid
+    x_tr = np.interp(t_ik, t_ocp, sc[:, 0])
+    y_tr = np.interp(t_ik, t_ocp, sc[:, 1])
+    θ_tr = np.interp(t_ik, t_ocp, sc[:, 2])
+    γ_tr = np.interp(t_ik, t_ocp, sc[:, 3])
+    xt_c = x_tr + LF * np.cos(θ_tr) + LB * np.cos(θ_tr - γ_tr)
+    yt_c = y_tr + LF * np.sin(θ_tr) + LB * np.sin(θ_tr - γ_tr)
+    th_c = θ_tr - γ_tr   # tractor heading
+
+    # S2: JLAP was already planned for the tractor
+    s2_x  = res_s2['states'][:, 0]
+    s2_y  = res_s2['states'][:, 1]
+    s2_th = res_s2['states'][:, 2]
+
+    t_raw  = np.concatenate([res_s1['time'], t_ik + T1, res_s2['time'][1:] + T1 + Tc])
+    x_raw  = np.concatenate([s1_x,  xt_c,  s2_x[1:]])
+    y_raw  = np.concatenate([s1_y,  yt_c,  s2_y[1:]])
+    th_raw = np.concatenate([s1_th, th_c,  s2_th[1:]])
+    v_raw  = np.concatenate([res_s1['v'],     res_corner_opt['v'],     res_s2['v'][1:]])
+    w_raw  = np.concatenate([res_s1['omega'], res_corner_opt['omega'], res_s2['omega'][1:]])
+
+    t_uni  = np.arange(t_raw[0], t_raw[-1], dt)
+    x_uni  = np.interp(t_uni, t_raw, x_raw)
+    y_uni  = np.interp(t_uni, t_raw, y_raw)
+    th_uni = np.interp(t_uni, t_raw, th_raw)
+    v_uni  = np.interp(t_uni, t_raw, v_raw)
+    w_uni  = np.interp(t_uni, t_raw, w_raw)
+
+    states   = np.column_stack([x_uni, y_uni, th_uni])
+    controls = np.vstack([v_uni, w_uni])
+    return Trajectory(x=states, u=controls, t=t_uni, sampling_time=dt)
+
+
+def _run_purepursuit(ref_traj):
+    model      = DifferentialDrive(wheel_base=TRACTOR_WHEEL_BASE)
+    sim        = TimeStepping(model, float(ref_traj.t[-1]), ref_traj.sampling_time)
+    controller = PurePursuit(model, ref_traj)
+    sim.run_with_controller(list(ref_traj.x[0]), ref_traj, controller)
+    return sim
+
+
+# =============================================================================
+# FIGURE 5 - PurePursuit tracking
+# =============================================================================
+def _fig5_purepursuit(ref_traj, sim):
+    t      = sim.t_out
+    ref_xy = ref_traj.x[:, :2]
+    trk_xy = sim.x_out[:2, :].T
+    cte    = np.array([
+        np.min(np.hypot(ref_xy[:, 0] - pt[0], ref_xy[:, 1] - pt[1]))
+        for pt in trk_xy
+    ])
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5),
+                             num='Figure 5 - PurePursuit Tracking (Tractor)')
+
+    # ---- [0] XY ----
+    ax = axes[0]
+    ax.set_aspect('equal')
+    ax.plot(ref_traj.x[:, 0], ref_traj.x[:, 1], '--', color=COL_REF, lw=1.5,
+            label='Reference (tractor)', zorder=2)
+    ax.plot(trk_xy[:, 0], trk_xy[:, 1], '-', color=COL_C_B, lw=2.0,
+            label='PurePursuit tracked', zorder=3)
+    ax.plot(*ref_traj.x[0, :2],  'o', color='green', ms=8, zorder=4, label='Start')
+    ax.plot(*ref_traj.x[-1, :2], 's', color='red',   ms=8, zorder=4, label='Goal')
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_title('XY Tracking (Tractor Reference)')
+    ax.legend(fontsize=9)
+
+    # ---- [1] Velocity ----
+    ax = axes[1]
+    nt = min(ref_traj.x.shape[0], sim.u_out.shape[1])
+    ax.plot(ref_traj.t[:nt], ref_traj.u[0, :nt], '--', color=COL_REF, lw=1.5,
+            label='Reference v')
+    ax.plot(t[:nt], sim.u_out[0, :nt], '-', color=COL_C_B, lw=1.8,
+            label='Tracked v')
+    ax.set_xlabel('time [s]')
+    ax.set_ylabel('v [m/s]')
+    ax.set_title('Linear Velocity')
+    ax.legend(fontsize=9)
+
+    # ---- [2] Cross-track error ----
+    ax = axes[2]
+    ax.plot(t[:len(cte)], cte * 1e3, '-', color='tomato', lw=1.8)
+    ax.set_xlabel('time [s]')
+    ax.set_ylabel('CTE [mm]')
+    ax.set_title('Cross-Track Error')
+    ax.set_ylim(bottom=0)
+
+    fig.tight_layout()
+    _savefig(fig, 'tt_fig_purepursuit.png')
 
 
 # =============================================================================
