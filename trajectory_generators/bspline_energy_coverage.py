@@ -101,7 +101,8 @@ class BSplineEnergyCoverage(BSplineCoverage):
                  alpha_entry=None, alpha_exit=None, robot_params=None,
                  energy_coeffs_right=None, energy_coeffs_left=None,
                  w_time=1.0, w_energy=1.0, e_max=None, p_electronics=2.0,
-                 acc_max=None, jerk_max=None):
+                 acc_max=None, jerk_max=None, max_iter=10000,
+                 p_peak_max=None):
         """! Constructor.
 
         All parameters of BSplineCoverage are accepted unchanged.
@@ -131,13 +132,19 @@ class BSplineEnergyCoverage(BSplineCoverage):
             limits [m/s², m/s², rad/s²]. None keeps BSplineCoverage defaults.
         @param jerk_max<list|None>: [jx_max, jy_max, jalpha_max] physical jerk
             limits [m/s³, m/s³, rad/s³]. None keeps BSplineCoverage defaults.
+        @param max_iter<int>: IPOPT iteration cap (see BSplineCoverage).
+        @param p_peak_max<float|None>: Hard upper bound on per-node total
+            motor power P_i [W], enforced at every collocation node. None
+            (default) leaves peak power unconstrained -- the objective only
+            bounds the time-integral of power (energy), not its instantaneous
+            value, so large w_energy alone can still produce a sharp peak.
         """
         super().__init__(waypoints, bound, n_ctrl_pts, spline_order,
                          n_sampling, vel_max, vel_min_lin, eps_nonh,
                          v_entry, v_exit, a_entry, a_exit,
                          omega_entry, omega_exit,
                          alpha_entry, alpha_exit,
-                         acc_max, jerk_max)
+                         acc_max, jerk_max, max_iter)
 
         self._robot = {**self._DEFAULT_ROBOT_PARAMS, **(robot_params or {})}
         self._e_coeffs_right = list(
@@ -155,6 +162,7 @@ class BSplineEnergyCoverage(BSplineCoverage):
         self._w_energy = float(w_energy)
         self._e_max = e_max
         self._p_elec = float(p_electronics)
+        self._p_peak_max = p_peak_max
 
     def generate_trajectory(self, warm_start=None):
         """! Build and solve the energy-aware OCP.
@@ -238,12 +246,24 @@ class BSplineEnergyCoverage(BSplineCoverage):
         if self._e_max is not None:
             opti.subject_to(energy_sym <= self._e_max)
 
+        # --- Optional hard peak-power constraint ------------------------------
+        # Bounds P_i directly at every node, unlike w_energy (which only
+        # penalises the time-integral of power and can still admit a sharp,
+        # narrow spike at large w_energy -- see module docstring).
+        if self._p_peak_max is not None:
+            opti.subject_to(power_sym <= float(self._p_peak_max))
+
         # --- Solve -----------------------------------------------------------
         try:
             sol = opti.solve()
             dbg = sol
+            return_status = sol.stats()['return_status']
         except Exception:
             dbg = opti.debug
+            try:
+                return_status = opti.debug.stats()['return_status']
+            except Exception:
+                return_status = 'Exception_Raised'
 
         T_val      = dbg.value(T)
         s_val      = dbg.value(s)
@@ -314,6 +334,7 @@ class BSplineEnergyCoverage(BSplineCoverage):
             'time_ik':  t_interp,
             'power':    power_val,
             'energy':   energy_val,
+            'return_status': return_status,
         }
 
     # ==========================================================================

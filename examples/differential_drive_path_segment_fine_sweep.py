@@ -53,7 +53,7 @@ from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
 # =============================================================================
 SAVE_FIGS   = True
 FIG_OUT_DIR = (pathlib.Path(__file__).resolve().parent.parent.parent
-               / 'Writting' / 'energy_aware_fine_sweep')
+               / 'Writting' / 'energy_aware' / 'energy_aware_fine_sweep')
 
 
 def _savefig(fig, filename):
@@ -87,13 +87,13 @@ L_INPUT     = 1.0           # desired standoff from corner vertex [m]
 B_INPUT     = 0.08          # desired deviation tolerance [m]
 V_MAX_SEG   = 0.5           # [m/s]
 A_MAX_SEG   = 1.0           # [m/s^2]
-L_WHEELBASE = 0.35          # [m]
+L_WHEELBASE = 0.53          # [m]
 
 # EulerJLAP (straight segments) -- NewMiniAGV defaults
 JLAP_ROBOT_PARAMS = {
     'robot_mass':         50.4,
-    'robot_width':        0.510,
-    'wheel_radius':       0.3,
+    'robot_width':        0.53,
+    'wheel_radius':       0.15,
     'gear_ratio':         40.0,
     'rated_motor_torque': 1.3,
     'rated_motor_speed':  3500.0,
@@ -137,7 +137,7 @@ def _make_bspline_common(v_h):
     )
 
 
-ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.3}
+ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.15}
 
 ENERGY_COEFFS_RIGHT = [
     0.302433145557389,
@@ -401,15 +401,22 @@ def _solve_corner(corner_wps, w_energy, warm_start=None,
 
 
 def _compute_corner_power(res):
-    """! Evaluate motor power from IK outputs of a corner result."""
+    """! Evaluate motor power from a corner result's own acc_path/alpha
+    fields (Pchip-interpolated directly from the OCP's analytically-exact
+    per-node acceleration), NOT by re-differentiating v/omega with
+    np.gradient. Re-differentiating an already-interpolated velocity array
+    with an assumed-uniform dt is numerically unreliable: verified to
+    produce apparent peak power up to 7x the true analytic value at some
+    sweep points (see differential_drive_comparison.py's
+    _compute_power_uniform docstring for the full diagnosis)."""
     l = ROBOT_PARAMS_BSPLINE['l']
     v, omega = res['v'], res['omega']
-    dt = 0.01
+    acc_path, alpha = res['acc_path'], res['alpha']
 
     v_r = v + l * omega
     v_l = v - l * omega
-    a_r = np.gradient(v_r, dt)
-    a_l = np.gradient(v_l, dt)
+    a_r = acc_path + l * alpha
+    a_l = acc_path - l * alpha
 
     def _p(vw, aw, c):
         return np.maximum(
@@ -589,21 +596,24 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
         print(f"  NOTE: w_e=0.0 did not yield minimum time in sweep; "
               f"using w_e={we_time_ref:.4f} as time reference.")
 
-    # Pareto knee: restrict to the non-dominated front in (te, pp) space,
-    # then find the point with max perpendicular distance from the chord
-    # connecting the two extreme Pareto-optimal endpoints.
-    _pf = _pareto_front_idx(total_energies, peak_powers)
-    if len(_pf) >= 3:
-        _te_n = (total_energies - total_energies.min()) / max(float(total_energies.max() - total_energies.min()), 1e-12)
-        _pp_n = (peak_powers    - peak_powers.min())    / max(float(peak_powers.max()    - peak_powers.min()),    1e-12)
-        _ax, _ay = _te_n[_pf[0]], _pp_n[_pf[0]]
-        _bx, _by = _te_n[_pf[-1]], _pp_n[_pf[-1]]
-        _denom = max(float(np.hypot(_bx - _ax, _by - _ay)), 1e-12)
-        _pf_mid = _pf[1:-1]
-        _dist  = np.abs((_by - _ay) * (_te_n[_pf_mid] - _ax) - (_bx - _ax) * (_pp_n[_pf_mid] - _ay)) / _denom
-        opt_idx = int(_pf_mid[np.argmax(_dist)])
-    elif len(_pf) >= 1:
-        opt_idx = int(_pf[len(_pf) // 2])
+    # Pareto knee: peak power saturates to a physical floor (the motor-power
+    # model's own asymptote) after a short initial drop, while mission time
+    # increases monotonically with w_e over the whole sweep. In the full
+    # (time, peak_power, energy) trade-off, the knee is therefore the SMALLEST
+    # w_e whose peak power is already within a small tolerance of the sweep's
+    # floor -- since w_e is swept in ascending order and time is monotonic in
+    # w_e, this is automatically the minimum-time point among all
+    # power-saturated solutions, and it is non-dominated (no later point beats
+    # it on time). A naive chord-distance search on the raw (te, pp) Pareto
+    # front is numerically unstable here: once pp is flat to within IPOPT
+    # solve-to-solve noise (~1e-6 W) over most of the sweep, the strict-
+    # dominance front collapses to a handful of points deep in that flat tail
+    # and the resulting "knee" is a noise artifact, not the true elbow.
+    _pp_floor = float(np.min(peak_powers))
+    _pp_tol   = 0.01  # W -- far above solver noise, far below the ~4 W transient drop
+    _sat      = peak_powers <= _pp_floor + _pp_tol
+    if _sat.any():
+        opt_idx = int(np.argmax(_sat))
     else:
         opt_idx = energy_opt_idx
     if float(we_values[opt_idx]) == 0.0 and len(we_values) > 1:
@@ -1099,8 +1109,8 @@ def _fig6_pareto_front(sweep):
                zorder=6, label=f'Time-opt  ($w_e$={we_ref:.4f})')
     ax.annotate(f'time-opt\n$w_e$={we_ref:.4f}',
                 xy=(te[tri], pp[tri]),
-                xytext=(6, 6), textcoords='offset points',
-                fontsize=8, color=COL_S1)
+                xytext=(-70, -8), textcoords='offset points',
+                fontsize=8, color=COL_S1, zorder=7)
 
     # Pareto knee marker
     ax.axvline(te[oi], color=COL_OPT, ls='--', lw=1.0, alpha=0.7, zorder=2)
@@ -1122,7 +1132,7 @@ def _fig6_pareto_front(sweep):
 
     ax.set_xlabel('Total Energy [J]')
     ax.set_ylabel('Peak Motor Power [W]')
-    ax.legend(fontsize=9, loc='upper right')
+    ax.legend(fontsize=9, loc='center left')
     fig.tight_layout()
     _savefig(fig, 'fig_pareto.png')
 

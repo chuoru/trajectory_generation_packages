@@ -87,13 +87,13 @@ L_INPUT     = 1.0           # desired standoff from corner vertex [m]
 B_INPUT     = 0.08          # desired deviation tolerance [m]
 V_MAX_SEG   = 0.5           # [m/s]
 A_MAX_SEG   = 1.0           # [m/s^2]
-L_WHEELBASE = 0.35          # [m]
+L_WHEELBASE = 0.53          # [m]
 
 # EulerJLAP (straight segments) -- NewMiniAGV defaults
 JLAP_ROBOT_PARAMS = {
     'robot_mass':         50.4,
-    'robot_width':        0.510,
-    'wheel_radius':       0.3,
+    'robot_width':        0.53,
+    'wheel_radius':       0.15,
     'gear_ratio':         40.0,
     'rated_motor_torque': 1.3,
     'rated_motor_speed':  3500.0,
@@ -144,7 +144,7 @@ def _make_bspline_common(v_h):
     )
 
 
-ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.3}
+ROBOT_PARAMS_BSPLINE = {'l': 0.53 / 2, 'r': 0.15}
 
 ENERGY_COEFFS_RIGHT = [
     0.302433145557389,

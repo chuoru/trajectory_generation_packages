@@ -40,7 +40,7 @@ class BSplineCoverage:
                  a_entry=None, a_exit=None,
                  omega_entry=None, omega_exit=None,
                  alpha_entry=None, alpha_exit=None,
-                 acc_max=None, jerk_max=None):
+                 acc_max=None, jerk_max=None, max_iter=10000):
         """! Constructor.
         @param waypoints<list>: Via-points [[x, y, theta], ...]. At least 2.
         @param bound<float>: Half-width of the corridor around each segment [m].
@@ -59,6 +59,9 @@ class BSplineCoverage:
             limits [m/s², m/s², rad/s²]. None keeps default [20, 20, 10].
         @param jerk_max<list|None>: [jx_max, jy_max, jalpha_max] physical jerk
             limits [m/s³, m/s³, rad/s³]. None keeps default [1e3, 1e3, 100].
+        @param max_iter<int>: IPOPT iteration cap. Default 10000; increase for
+            problem instances (e.g. large w_energy) that need more iterations
+            to reach 'Solve_Succeeded' rather than hitting the cap.
         """
         self._waypoints = np.array(waypoints, dtype=float)
         self._bound = bound
@@ -105,7 +108,7 @@ class BSplineCoverage:
             'ipopt',
             {'print_time': False},
             {
-                'max_iter': 10000,
+                'max_iter': int(max_iter),
                 'print_level': 3,
                 'tol': 1e-5,
                 'acceptable_tol': 5e-3,

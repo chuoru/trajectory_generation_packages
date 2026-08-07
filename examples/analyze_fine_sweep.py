@@ -53,21 +53,28 @@ STYLE_KNEE   = ('red',   '--')   # dashed
 STYLE_ENERGY = ('blue',  '-.')   # dash-dot
 COL_REF      = '#888888'
 
-# Wheel jerk limit [m/s³] — must match J_LIM in differential_drive_path_segment_fine_sweep.py
-J_LIM = 3.547
-
 # Robot kinematics — must match JLAP_ROBOT_PARAMS in differential_drive_path_segment_fine_sweep.py
 JLAP_DT = 0.05
 JLAP_ROBOT_PARAMS = {
     'robot_mass':         50.4,
-    'robot_width':        0.510,
-    'wheel_radius':       0.3,
+    'robot_width':        0.53,
+    'wheel_radius':       0.15,
     'gear_ratio':         40.0,
     'rated_motor_torque': 1.3,
     'rated_motor_speed':  3500.0,
     'motor_inertia':      0.66e-4,
     'path_vel_lim':       0.5,
 }
+
+# Wheel jerk limit [m/s³] — derived the same way as J_LIM in
+# differential_drive_path_segment_fine_sweep.py, must stay in sync with it.
+_j_rated_torque = JLAP_ROBOT_PARAMS['gear_ratio'] * JLAP_ROBOT_PARAMS['rated_motor_torque']
+_j_inertia      = JLAP_ROBOT_PARAMS['gear_ratio']**2 * JLAP_ROBOT_PARAMS['motor_inertia']
+_j_r            = JLAP_ROBOT_PARAMS['wheel_radius']
+_j_m            = JLAP_ROBOT_PARAMS['robot_mass']
+_A_LIM          = (0.5 * _j_rated_torque * _j_r
+                   / (0.25 * _j_m * _j_r**2 + _j_inertia))
+J_LIM = _A_LIM / (40.0 * JLAP_DT)
 
 
 # =============================================================================
@@ -434,6 +441,39 @@ def fig_corner_xy(corners, opt):
 
 
 # =============================================================================
+# COMPARISON TABLE
+# =============================================================================
+def print_comparison_table(sw, opt):
+    ti, ki, ei = opt['time_idx'], opt['knee_idx'], opt['energy_idx']
+    col_w = 18
+    lbl_w = 21
+
+    sep   = '+' + '-' * lbl_w + '+' + ('-' * col_w + '+') * 3
+    hdr   = '|' + ' Metric'.ljust(lbl_w) + '|'
+    for label in ('Time-optimal', 'Pareto Knee', 'Energy-optimal'):
+        hdr += label.center(col_w) + '|'
+
+    rows = [
+        ('w_e',              '{:>16.6f}',  sw['we'],  [ti, ki, ei]),
+        ('Mission Time [s]', '{:>16.3f}',  sw['mt'],  [ti, ki, ei]),
+        ('Total Energy [J]', '{:>16.3f}',  sw['te'],  [ti, ki, ei]),
+        ('Peak Power [W]',   '{:>16.3f}',  sw['pp'],  [ti, ki, ei]),
+    ]
+
+    print()
+    print(sep)
+    print(hdr)
+    print(sep)
+    for label, fmt, arr, idxs in rows:
+        line = '|' + (' ' + label).ljust(lbl_w) + '|'
+        for idx in idxs:
+            line += fmt.format(arr[idx]) + '  |'
+        print(line)
+    print(sep)
+    print()
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main():
@@ -451,13 +491,7 @@ def main():
     sw  = apply_filters(sw_raw)
     opt = pick_optima(sw)
 
-    print(f"\n  Time-optimal    w_e = {opt['time_we']:.6f}  "
-          f"T = {sw['mt'][opt['time_idx']]:.3f} s")
-    print(f"  Pareto knee     w_e = {opt['knee_we']:.6f}  "
-          f"Peak P = {sw['pp'][opt['knee_idx']]:.3f} W")
-    print(f"  Energy-optimal  w_e = {opt['energy_we']:.6f}  "
-          f"E = {sw['te'][opt['energy_idx']]:.3f} J")
-    print()
+    print_comparison_table(sw, opt)
 
     fig_sweep_stats(sw, opt)
     fig_pareto(sw, opt)
