@@ -489,21 +489,25 @@ def _pareto_front_idx(te, pp):
     return idx[np.argsort(te[idx])]
 
 
-def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
-    """! Sweep w_energy over 40 linearly-spaced values and identify three optimal points.
+def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None, n_points=40):
+    """! Sweep w_energy over n_points linearly-spaced values and identify three optimal points.
 
     Returns time-optimal, Pareto-knee (best tradeoff), and energy-optimal solutions.
 
     @param a_entry<float>:     Forward acceleration at corner entry [m/s²].
     @param alpha_entry<float>: Angular acceleration at corner entry [rad/s²].
     @param v_handoff<float|None>: Entry/exit speed for the corner [m/s].
+    @param n_points<int>:      Number of sweep points (default 40, matching the
+                                paper's main corner sweep; a smaller value trades
+                                sweep resolution for wall-clock time, e.g. for
+                                exploratory generalisation checks at other angles).
     @return dict with sweep arrays and three optimal w_e values.
     """
     v_h = float(v_handoff) if v_handoff is not None else V_HANDOFF
 
-    # 40 linearly-spaced points in [0.0, 1.0] swept high-to-low for warm-starting.
+    # n_points linearly-spaced points in [0.0, 1.0] swept high-to-low for warm-starting.
     # Any points that fail to converge are caught by the exception handler and skipped.
-    we_values = np.linspace(0.0, 1.0, 40)[::-1]
+    we_values = np.linspace(0.0, 1.0, int(n_points))[::-1]
 
     peak_powers    = []
     total_energies = []
