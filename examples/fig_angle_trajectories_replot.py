@@ -1,16 +1,8 @@
-"""! Overlay the actual generated corner trajectories (XY) at 45/90/135
-degrees, each solved at that angle's own knee weight (from Table 2 /
-angle_sweep_generalization.py), to visually complement
-fig_angle_generalization.py's power/energy comparison with the geometric
-shape of the corner itself.
-
-NOTE: an isolated single cold-started solve at the knee weight for 135 deg
-failed to converge (Maximum_Iterations_Exceeded after 720s) even though the
-same weight solves fine as part of a full warm-started sweep (that's how
-Table 2's 135 deg row was obtained). This script therefore reuses the same
-_sweep_we() warm-start chain used for Table 2/Fig. 4, and extracts the
-converged trajectory at the knee weight from the sweep's res_by_we dict,
-instead of attempting a fresh isolated solve.
+"""! Rebuild fig_angle_trajectories.png with the legend moved to lower right
+(matching Fig. 6's style request). Re-solves only 45/90 deg (fast, reliable)
+and reuses the already-saved, independently-verified 135 deg trajectory from
+traj_135_knee.csv (see fig_angle_traj_135_only.py) instead of re-solving the
+slow/flaky 135 deg case again.
 """
 import os
 os.environ.setdefault('MPLBACKEND', 'Agg')
@@ -22,43 +14,47 @@ import differential_drive_path_segment_fine_sweep as m
 
 m._set_paper_style()
 
-N_POINTS = {45: 15, 90: 15, 135: 8}   # matches the resolution used for Table 2
-COLORS   = {45: '#1f77b4', 90: '#d62728', 135: '#2ca02c'}
-MARKERS  = {45: 'o', 90: 's', 135: '^'}
+COLORS  = {45: '#1f77b4', 90: '#d62728', 135: '#2ca02c'}
+MARKERS = {45: 'o', 90: 's', 135: '^'}
+
+cache_dir = os.path.join(os.path.dirname(__file__), 'csv_output_fine_sweep')
+os.makedirs(cache_dir, exist_ok=True)
+
+
+def _swap(pt):
+    """Plot-orientation transform (x'=y, y'=x): converts this script's
+    north-to-east turn into an east-to-north turn, matching fig_corridor.png
+    (Fig. 6)'s approach-from-the-left, turn-toward-bottom-right, exit-upward
+    convention (a coordinate swap, not a rotation, since the two turns are
+    mirror images of each other in handedness)."""
+    pt = np.asarray(pt)
+    if pt.ndim == 1:
+        return np.array([pt[1], pt[0]])
+    return np.column_stack([pt[:, 1], pt[:, 0]])
+
 
 results = {}
-for angle_deg in [45, 90, 135]:
+for angle_deg in [45, 90]:
     beta_rad = -np.deg2rad(angle_deg)
     m.BETA = beta_rad
     m.HEADING_OUT = float(m.HEADING_IN + beta_rad)
 
-    print(f"Sweeping {angle_deg} deg corner ({N_POINTS[angle_deg]} points) ...")
+    print(f"Sweeping {angle_deg} deg corner (15 points) ...")
     seg_info = m._segment_corner()
     corner_wps = m._build_corner_waypoints(seg_info['arc_entry_ext_world'],
                                             seg_info['arc_exit_ext_world'])
     v_h = m._find_smooth_v_handoff(corner_wps)
-    sweep = m._sweep_we(corner_wps, v_handoff=v_h, n_points=N_POINTS[angle_deg])
-
+    sweep = m._sweep_we(corner_wps, v_handoff=v_h, n_points=15)
     knee_we = sweep['opt_we']
     res = sweep['res_by_we'][knee_we]
-    print(f"  knee w_e={knee_we:.4f}, return_status={res.get('return_status', 'n/a')}")
-    if res.get('return_status') != 'Solve_Succeeded':
-        print(f"  WARNING: knee solve for {angle_deg} deg did not fully converge "
-              f"({res.get('return_status')}); using it anyway since it came from "
-              f"the same successful sweep that produced Table 2.")
-
+    print(f"  knee w_e={knee_we:.4f}, status={res.get('return_status')}")
     results[angle_deg] = {
-        'states': res['states'],
-        'we': knee_we,
+        'states': res['states'], 'we': knee_we,
         'arc_entry': seg_info['arc_entry_world'],
         'arc_exit': seg_info['arc_exit_world'],
         'vertex': seg_info['corner_vertex'],
     }
-
-    # Cache states/anchors to CSV so future style-only tweaks (legend
-    # position, colours, etc.) don't require re-solving the OCP.
-    cache_dir = os.path.join(os.path.dirname(__file__), 'csv_output_fine_sweep')
-    os.makedirs(cache_dir, exist_ok=True)
+    # Cache so any further plot-only tweak never needs to re-solve again.
     np.savetxt(os.path.join(cache_dir, f'traj_{angle_deg}_knee_cache.csv'),
                res['states'][:, :2], delimiter=',', header='x,y', comments='')
     with open(os.path.join(cache_dir, f'traj_{angle_deg}_anchors_cache.csv'), 'w') as f:
@@ -68,6 +64,25 @@ for angle_deg in [45, 90, 135]:
         f.write(f"arc_exit,{seg_info['arc_exit_world'][0]},{seg_info['arc_exit_world'][1]}\n")
         f.write(f"vertex,{seg_info['corner_vertex'][0]},{seg_info['corner_vertex'][1]}\n")
 
+# Reuse the already-verified 135 deg trajectory (matches Table 2 exactly;
+# see fig_angle_traj_135_only.py / traj_135_knee.csv).
+xy_135 = np.loadtxt(os.path.join(cache_dir, 'traj_135_knee.csv'),
+                     delimiter=',', skiprows=1)
+results[135] = {
+    'states': xy_135, 'we': 0.142857,
+    'arc_entry': np.array([-6.123234e-17, 9.000000e+00]),
+    'arc_exit': np.array([0.70710678, 9.29289322]),
+    'vertex': np.array([0.0, 10.0]),
+}
+
+# Apply the plot-orientation swap to everything before drawing.
+for angle_deg in [45, 90, 135]:
+    r = results[angle_deg]
+    r['states'] = _swap(r['states'])
+    r['arc_entry'] = _swap(r['arc_entry'])
+    r['arc_exit'] = _swap(r['arc_exit'])
+    r['vertex'] = _swap(r['vertex'])
+
 fig, ax = plt.subplots(figsize=(6.5, 6), num='Corner-angle trajectory overlay')
 
 vertex = results[90]['vertex']
@@ -76,7 +91,7 @@ ax.scatter([vertex[0]], [vertex[1]], marker='x', s=90, color='black',
 
 for angle_deg in [45, 90, 135]:
     r = results[angle_deg]
-    xy = r['states'][:, :2]
+    xy = r['states'][:, :2] if r['states'].ndim == 2 and r['states'].shape[1] >= 2 else r['states']
     ax.plot(xy[:, 0], xy[:, 1], color=COLORS[angle_deg], lw=2.0,
             label=f'{angle_deg}$^\\circ$ (knee, $w_e$={r["we"]:.3f})',
             zorder=4)
