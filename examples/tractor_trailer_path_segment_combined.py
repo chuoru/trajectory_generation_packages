@@ -421,6 +421,7 @@ def main():
     print(f"  Reference waypoints : {len(ref_traj.x)}")
     print(f"  Simulation steps    : {sim_pp.x_out.shape[1]}")
     print(f"  Final position error: {np.hypot(*(trk_end - ref_end)) * 1e3:.1f} mm")
+    _print_tracking_summary(ref_traj, sim_pp, mB)
 
     # ------------------------------------------------------------------
     # Figures
@@ -827,6 +828,58 @@ def _run_purepursuit(ref_traj):
     controller = PurePursuit(model, ref_traj)
     sim.run_with_controller(list(ref_traj.x[0]), ref_traj, controller)
     return sim
+
+
+# =============================================================================
+# TRACKING SUMMARY TABLE
+# =============================================================================
+def _print_tracking_summary(ref_traj, sim_pp, corner_metrics):
+    """Side-by-side table: reference trajectory metrics vs PP tracking metrics."""
+    lbl_w, col_w = 25, 20
+    sep = '+' + '-' * lbl_w + '+' + ('-' * col_w + '+') * 2
+
+    def _cell(v, fmt):
+        return '---'.rjust(col_w - 2) if v is None else fmt.format(v)
+
+    def _row(lbl, vals, fmts):
+        cells = ''.join(f'| {_cell(v, f)} ' for v, f in zip(vals, fmts))
+        return f'| {lbl:<{lbl_w - 2}} {cells}|'
+
+    def _hrow(lbl, vals):
+        cells = ''.join(f'| {str(v).center(col_w - 2)} ' for v in vals)
+        return f'| {lbl:<{lbl_w - 2}} {cells}|'
+
+    ref_xy = ref_traj.x[:, :2]
+    trk_xy = sim_pp.x_out[:2, :].T
+    nt     = min(ref_traj.x.shape[0], sim_pp.x_out.shape[1])
+    cte    = np.array([np.min(np.hypot(ref_xy[:, 0] - pt[0], ref_xy[:, 1] - pt[1]))
+                       for pt in trk_xy])
+    he     = sim_pp.x_out[2, :nt] - ref_traj.x[:nt, 2]
+    he     = np.arctan2(np.sin(he), np.cos(he))
+    v_err  = np.abs(ref_traj.u[0, :nt] - sim_pp.u_out[0, :nt])
+
+    F3 = '{:>18.3f}'
+    F2 = '{:>18.2f}'
+    F4 = '{:>18.4f}'
+
+    print()
+    print(sep)
+    print(_hrow('', ['Reference', 'Tracked (PP)']))
+    print(sep)
+    print(_row('mission time [s]',
+               [float(ref_traj.t[-1]),         float(sim_pp.t_out[-1])], [F3, F3]))
+    print(_row('total energy [J]',
+               [corner_metrics['energy'],       None],                    [F2, F2]))
+    print(_row('peak power [W]',
+               [corner_metrics['peak_power'],   None],                    [F2, F2]))
+    print(sep)
+    print(_row('mean CTE [cm]',
+               [None, float(cte.mean() * 1e2)],                          [F3, F3]))
+    print(_row('mean heading err [deg]',
+               [None, float(np.rad2deg(np.abs(he).mean()))],              [F3, F3]))
+    print(_row('max vel error [m/s]',
+               [None, float(v_err.max())],                                [F4, F4]))
+    print(sep)
 
 
 # =============================================================================

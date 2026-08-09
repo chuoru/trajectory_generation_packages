@@ -218,6 +218,7 @@ class BSplineEnergyTractorTrailerCoverage(BSplineTractorTrailerCoverage):
 
         # Kinodynamic + path constraints (tractor-trailer, inherited)
         self._add_dynamic_constraints(opti, s, ds, dds, ddds, T)
+        self._add_jackknife_constraints(opti, pg)
         self._add_boundary_constraints(opti, px, py, pt, pg)
         self._add_corridor_constraints(opti, px, py)
 

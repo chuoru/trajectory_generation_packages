@@ -179,6 +179,7 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
         opti.minimize(cs.sum1(T))
 
         self._add_dynamic_constraints(opti, s, ds, dds, ddds, T)
+        self._add_jackknife_constraints(opti, pg)
         self._add_boundary_constraints(opti, px, py, pt, pg)
         self._add_corridor_constraints(opti, px, py)
 
@@ -309,11 +310,15 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
         Replaces the differential-drive nonholonomic constraint with:
           1. Trailer lateral velocity ≈ 0  (same algebraic form as diff-drive)
           2. Hitch angle coupling equality  lb·dγ = dθ·(lb + lf·cos(γ)) + V·T·sin(γ)
-          3. Hitch angle bounds |γ| ≤ γ_max
-          4. Trailer feedrate and forward-only bounds
-          5. Optional tractor velocity bounds
-          6. Acceleration / jerk bounds on dims 0,1,2 (trailer x,y,θ)
-          7. T > 0
+          3. Trailer feedrate and forward-only bounds
+          4. Optional tractor velocity bounds
+          5. Acceleration / jerk bounds on dims 0,1,2 (trailer x,y,θ)
+          6. T > 0
+
+        The hitch angle (jackknife) bound |γ| ≤ γ_max is NOT enforced here;
+        see _add_jackknife_constraints, which bounds the γ control points
+        directly so the bound is guaranteed over the entire spline arc via
+        the B-spline convex-hull property, not just at these sample nodes.
         """
         lb       = self._lb
         lf       = self._lf
@@ -348,29 +353,25 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
             opti.subject_to(coupling <= self._eps_hitch * Ti)
             opti.subject_to(-self._eps_hitch * Ti <= coupling)
 
-            # 3. Hitch angle bounds
-            opti.subject_to(s[i, 3] <= gamma_max)
-            opti.subject_to(-gamma_max <= s[i, 3])
-
-            # 4. Trailer feedrate bounds
+            # 3. Trailer feedrate bounds
             opti.subject_to(fwd <= v_fwd * Ti)
             opti.subject_to(vlin_min * Ti <= fwd)
 
-            # 5. Trailer angular velocity bounds (ω_trailer)
+            # 4. Trailer angular velocity bounds (ω_trailer)
             opti.subject_to(self._vel_min[2] * Ti <= ds[i, 2])
             opti.subject_to(ds[i, 2] <= self._vel_max[2] * Ti)
 
-            # 6. Acceleration bounds (trailer x, y, θ only — dims 0,1,2)
+            # 5. Acceleration bounds (trailer x, y, θ only — dims 0,1,2)
             for dim in range(3):
                 opti.subject_to(amin[dim] * Ti**2 <= dds[i, dim])
                 opti.subject_to(dds[i, dim] <= amax[dim] * Ti**2)
 
-            # 7. Jerk bounds (trailer x, y, θ only — dims 0,1,2)
+            # 6. Jerk bounds (trailer x, y, θ only — dims 0,1,2)
             for dim in range(3):
                 opti.subject_to(jmin[dim] * Ti**3 <= ddds[i, dim])
                 opti.subject_to(ddds[i, dim] <= jmax[dim] * Ti**3)
 
-            # 8. Optional tractor velocity bounds
+            # 7. Optional tractor velocity bounds
             if self._vel_tractor_max is not None:
                 v_tmax = self._vel_tractor_max[0]
                 w_tmax = self._vel_tractor_max[1]
@@ -384,7 +385,7 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
                 opti.subject_to(w_sc <= w_tmax * lb * Ti)
                 opti.subject_to(-w_tmax * lb * Ti <= w_sc)
 
-            # 9. T must be positive
+            # 8. T must be positive
             opti.subject_to(Ti >= 1e-4)
 
         # Forward-only at entry/exit using known waypoint headings
@@ -423,6 +424,22 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
             opti.subject_to(dds[0, 2] == self._alpha_entry * T[0]**2)
         if self._alpha_exit is not None:
             opti.subject_to(dds[-1, 2] == self._alpha_exit * T[-1]**2)
+
+    def _add_jackknife_constraints(self, opti, pg):
+        """! Convex-hull-guaranteed jackknife bound |γ(τ)| ≤ γ_max for all τ.
+
+        Bounding every γ control point directly, rather than sampling γ(τ)
+        at the nt sample nodes, exploits the same B-spline convex-hull
+        property used for the corridor constraint (_add_corridor_constraints):
+        every point on a B-spline segment is a convex combination of its
+        local control points, so if all control points satisfy the bound,
+        the entire spline arc does too — including between sample nodes,
+        which the previous pointwise formulation could not guarantee.
+        """
+        gamma_max = self._gamma_max
+        for j in range(self._n_Q):
+            opti.subject_to(pg[j] <= gamma_max)
+            opti.subject_to(-gamma_max <= pg[j])
 
     def _add_boundary_constraints(self, opti, px, py, pt, pg):
         """! Pin start/end trailer pose and hitch angle to waypoint values."""
