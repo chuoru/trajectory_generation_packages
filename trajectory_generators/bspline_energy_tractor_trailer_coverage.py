@@ -100,6 +100,8 @@ class BSplineEnergyTractorTrailerCoverage(BSplineTractorTrailerCoverage):
                  gamma_max=0.785, gamma_entry=0.0, gamma_exit=0.0,
                  vel_tractor_max=None,
                  eps_hitch=0.05,
+                 gamma_margin=0.0,
+                 gamma_rate_max=None,
                  robot_params=None,
                  energy_coeffs_right=None, energy_coeffs_left=None,
                  w_time=1.0, w_energy=1.0,
@@ -109,6 +111,9 @@ class BSplineEnergyTractorTrailerCoverage(BSplineTractorTrailerCoverage):
         All parameters of BSplineTractorTrailerCoverage are accepted unchanged.
 
         @param eps_hitch<float>: Hitch coupling tolerance (see base class).
+        @param gamma_margin<float>: Jackknife safety margin (see base class).
+        @param gamma_rate_max<float|None>: Hitch angular-rate bound (see
+            base class).
         @param robot_params<dict|None>: Tractor physical parameters.
             Keys: 'l' (half-wheelbase [m]), 'r' (wheel radius [m]).
             Missing keys fall back to _DEFAULT_ROBOT_PARAMS.
@@ -134,6 +139,7 @@ class BSplineEnergyTractorTrailerCoverage(BSplineTractorTrailerCoverage):
             gamma_max=gamma_max, gamma_entry=gamma_entry,
             gamma_exit=gamma_exit, vel_tractor_max=vel_tractor_max,
             eps_hitch=eps_hitch,
+            gamma_margin=gamma_margin, gamma_rate_max=gamma_rate_max,
         )
         self._robot = {**self._DEFAULT_ROBOT_PARAMS, **(robot_params or {})}
         self._e_coeffs_right = list(

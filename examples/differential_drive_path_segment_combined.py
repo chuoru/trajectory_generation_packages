@@ -30,6 +30,7 @@
 import sys
 import os
 import pathlib
+import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as _cm
@@ -38,6 +39,7 @@ import matplotlib.colors as _mcolors
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # Internal library
+from fig_bspline_waypoints import _dim_line   # reuse dimension-line helper
 from trajectory_generators.path_segment import PathSegment
 from trajectory_generators.euler_jlap_coverage import EulerJLAPCoverage
 from trajectory_generators.bspline_energy_coverage import BSplineEnergyCoverage
@@ -81,6 +83,11 @@ BETA        = -np.pi / 2    # 90-degree right turn [rad]
 # Straight lead-in / lead-out added to BSpline corner region so the OCP
 # starts and ends on a straight section, giving smooth curvature ramp-up.
 L_TRANSITION = 0.5   # m
+
+# Coverage-corridor half-width (convex-hull constraint bound passed to
+# BSplineEnergyCoverage below); also used to draw the corridor shading in
+# Figure 1's inset and matches the value quoted in fig_corridor.png's caption.
+D_MAX = 0.25   # m
 
 # PathSegment feasibility inputs
 L_INPUT     = 1.0           # desired standoff from corner vertex [m]
@@ -130,7 +137,7 @@ def _make_bspline_common(v_h):
     stays consistent with the chosen handoff velocity.
     """
     return dict(
-        bound=0.25,
+        bound=D_MAX,
         n_ctrl_pts=6,
         spline_order=3,
         n_sampling=15,
@@ -175,13 +182,16 @@ COL_REF = 'gray'
 # PAPER STYLE
 # =============================================================================
 def _set_paper_style():
+    # Figures here are ~8x8in but embedded at width=9cm in the paper
+    # (scale factor ~0.44x), so source sizes must be ~2x the target
+    # printed size to stay legible after shrinking.
     plt.rcParams.update({
-        'font.size':       12,
-        'axes.labelsize':  12,
-        'xtick.labelsize': 11,
-        'ytick.labelsize': 11,
-        'legend.fontsize': 10,
-        'axes.titlesize':  12,
+        'font.size':       20,
+        'axes.labelsize':  20,
+        'xtick.labelsize': 17,
+        'ytick.labelsize': 17,
+        'legend.fontsize': 17,
+        'axes.titlesize':  20,
         'axes.grid':       False,
     })
 
@@ -331,6 +341,73 @@ def main():
 
     plt.show()
     plt.close('all')
+
+
+# =============================================================================
+# CACHED PIPELINE (this module's own corner scenario -- WP_START/CORNER/END
+# above, distinct from differential_drive_comparison.py's evaluation
+# scenario). Steps 1, 1b, 2a, 3, 2b of main(), without the CSV export /
+# pure-pursuit / figure calls. The w_energy sweep in Step 3 is slow, so the
+# result is cached to disk for regeneration scripts (e.g. regen_fig_overview.py)
+# that only need Figure 1's data and must not silently reuse the *other*
+# scenario's cached pipeline from differential_drive_comparison.py.
+# =============================================================================
+_PIPELINE_CACHE_PATH = (pathlib.Path(__file__).parent / 'csv_output'
+                        / 'fig1_pipeline_cache.pkl')
+
+
+def _run_own_pipeline(use_cache=True):
+    """! Run this module's own PathSegment + JLAP + w_e-sweep pipeline.
+
+    @return dict with keys: seg_info, res_s1, res_s2, res_corner_opt, sweep,
+                             v_handoff.
+    """
+    if use_cache and _PIPELINE_CACHE_PATH.exists():
+        print(f"  Loading cached pipeline from {_PIPELINE_CACHE_PATH}")
+        with open(_PIPELINE_CACHE_PATH, 'rb') as f:
+            return pickle.load(f)
+
+    seg_info      = _segment_corner()
+    arc_entry_ext = seg_info['arc_entry_ext_world']
+    arc_exit_ext  = seg_info['arc_exit_ext_world']
+    corner_wps    = _build_corner_waypoints(arc_entry_ext, arc_exit_ext)
+
+    v_handoff = _find_smooth_v_handoff(corner_wps)
+
+    res_s1        = _run_jlap_seg(WP_START, arc_entry_ext.tolist(),
+                                   initial_vel=0.0, final_vel=v_handoff)
+    a_s1_exit     = float(res_s1['acc_path'][-1])
+    alpha_s1_exit = float(res_s1['alpha'][-1])
+
+    sweep = _sweep_we(corner_wps, a_entry=a_s1_exit, alpha_entry=alpha_s1_exit,
+                      v_handoff=v_handoff)
+    opt_we    = sweep['opt_we']
+    res_by_we = sweep['res_by_we']
+    if opt_we in res_by_we:
+        res_corner_opt = res_by_we[opt_we]
+    else:
+        res_corner_time = res_by_we[sweep['we_time_ref']]
+        res_corner_opt = _solve_corner(corner_wps, w_energy=opt_we,
+                                       warm_start=res_corner_time,
+                                       v_entry=v_handoff, v_exit=v_handoff,
+                                       a_entry=a_s1_exit,
+                                       alpha_entry=alpha_s1_exit)
+
+    v_corner_exit = float(max(0.0, res_corner_opt['v'][-1]))
+    res_s2 = _run_jlap_seg(arc_exit_ext.tolist(), WP_END,
+                            initial_vel=v_corner_exit, final_vel=0.0)
+
+    result = dict(seg_info=seg_info, res_s1=res_s1, res_s2=res_s2,
+                  res_corner_opt=res_corner_opt, sweep=sweep,
+                  v_handoff=v_handoff)
+
+    if use_cache:
+        _PIPELINE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_PIPELINE_CACHE_PATH, 'wb') as f:
+            pickle.dump(result, f)
+        print(f"  Cached pipeline -> {_PIPELINE_CACHE_PATH}")
+
+    return result
 
 
 # =============================================================================
@@ -493,7 +570,7 @@ def _corner_metrics(res):
     @return dict with scalar and array metrics.
     """
     P_tot  = _compute_corner_power(res)
-    energy = float(res.get('energy', np.trapz(P_tot, dx=0.01)))
+    energy = float(res.get('energy', np.trapezoid(P_tot, dx=0.01)))
     st     = res['states']
     plen   = float(np.sum(np.sqrt(np.diff(st[:, 0])**2
                                   + np.diff(st[:, 1])**2)))
@@ -596,7 +673,7 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
             P_tot  = _compute_corner_power(res)
             T_tot  = float(res['time'][-1])
             peak_p = float(np.max(P_tot))
-            energy = float(res.get('energy', np.trapz(P_tot, dx=0.01)))
+            energy = float(res.get('energy', np.trapezoid(P_tot, dx=0.01)))
             if not (np.isfinite(peak_p) and np.isfinite(energy)):
                 raise ValueError("non-finite result")
             prev_res = res
@@ -818,18 +895,50 @@ def _draw_coverage_background(ax):
                                 lw=1.0, mutation_scale=12))
 
 
+def _dim_line_outer(ax, p0, p1, text, offset, color='black', fontsize=7):
+    """Dimension arrow like fig_bspline_waypoints._dim_line, but the label
+    sits on the far side of the arrow (away from the path) and is rotated
+    along the segment, so it never lands on the trajectory."""
+    p0, p1 = np.array(p0), np.array(p1)
+    d = p1 - p0
+    L = np.hypot(*d)
+    if L < 1e-9:
+        return
+    n = np.array([-d[1], d[0]]) / L
+    q0, q1 = p0 + offset * n, p1 + offset * n
+    ax.annotate('', xy=q1, xytext=q0,
+                arrowprops=dict(arrowstyle='<->', color=color, lw=0.7,
+                                shrinkA=0, shrinkB=0, mutation_scale=6))
+    ax.plot([p0[0], q0[0]], [p0[1], q0[1]], color=color, lw=0.4, ls=':')
+    ax.plot([p1[0], q1[0]], [p1[1], q1[1]], color=color, lw=0.4, ls=':')
+    ang = np.degrees(np.arctan2(d[1], d[0]))
+    if ang > 90:
+        ang -= 180
+    elif ang <= -90:
+        ang += 180
+    mid = (q0 + q1) / 2 + np.sign(offset) * 0.12 * n
+    ax.text(*mid, text, rotation=ang, rotation_mode='anchor',
+            ha='center', va='center', fontsize=fontsize, color=color)
+
+
 def _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt):
-    """! Zoomed-out boustrophedon overview with inset corner-detail cutout."""
-    fig, ax = plt.subplots(figsize=(8, 8),
+    """! Zoomed-out boustrophedon overview with inset corner-detail cutout.
+
+    Drawn at the paper's printed width (9 cm); all legend entries (main and
+    inset) go in one figure legend below the axes so nothing covers a path.
+    """
+    fig, ax = plt.subplots(figsize=(9.0 / 2.54, 4.35), constrained_layout=True,
                            num='Figure 1 - Segmented Path')
     ax.set_aspect('equal')
 
     # ---- background boustrophedon strips ----
     _draw_coverage_background(ax)
+    for ln in ax.lines:
+        ln.set_linewidth(0.7)
 
     # ---- reference L-path waypoints ----
     ref = np.array([WP_START, WP_CORNER, WP_END])
-    ax.plot(ref[:, 0], ref[:, 1], 'o', color='black', markersize=7, zorder=6)
+    ax.plot(ref[:, 0], ref[:, 1], 'o', color='black', markersize=3, zorder=6)
 
     # ---- computed trajectory on main axes (overview, no arrows for clarity) ----
     s1  = res_s1['states']
@@ -837,87 +946,125 @@ def _fig1_segmented_path(seg_info, res_s1, res_s2, res_corner_opt):
     s2  = res_s2['states']
     arc = seg_info['arc_world']
 
-    ax.plot(s1[:, 0], s1[:, 1], '-', color=COL_S1, linewidth=2.0,
-            label='Segment 1  (JLAP)', zorder=4)
-    ax.plot(sc[:, 0], sc[:, 1], '-', color=COL_C,  linewidth=2.0,
-            label='Corner  (B-spline, opt $w_e$)', zorder=4)
-    ax.plot(s2[:, 0], s2[:, 1], '-', color=COL_S2, linewidth=2.0,
-            label='Segment 2  (JLAP)', zorder=4)
+    ax.plot(s1[:, 0], s1[:, 1], '-', color=COL_S1, linewidth=1.2,
+            label='Segment 1 (JLAP)', zorder=4)
+    ax.plot(sc[:, 0], sc[:, 1], '-', color=COL_C,  linewidth=1.2,
+            label='Corner (B-spline, opt. $w_e$)', zorder=4)
+    ax.plot(s2[:, 0], s2[:, 1], '-', color=COL_S2, linewidth=1.2,
+            label='Segment 2 (JLAP)', zorder=4)
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.legend(loc='upper left', fontsize=10)
-    ax.set_xlim(-0.5, 10.5)
-    ax.set_ylim(-0.5, 10.5)
+    ax.set_xlim(-1.3, 10.5)
+    ax.set_ylim(-0.5, 11.3)
 
     # ================================================================
     # INSET: zoom into corner region where PathSegment planning occurs
     # ================================================================
     # Data extent of the zoom window (corner now at (0, 10))
-    xi1, xi2 = -0.5, 2.8
-    yi1, yi2 = 7.5, 10.5
+    xi1, xi2 = -1.2, 2.8
+    yi1, yi2 = 7.5, 11.2
 
     # Place inset in the upper-right area (clear of the computed path)
-    axins = ax.inset_axes([0.55, 0.55, 0.42, 0.42])
+    axins = ax.inset_axes([0.47, 0.44, 0.52, 0.53])
+    # axins is a child artist of ax, so it is z-sorted against ax's own
+    # artists (e.g. the ref-waypoint markers at zorder=6); without a higher
+    # zorder here, any such artist would paint through the inset's opaque
+    # background wherever it happens to fall under the inset's screen area.
+    axins.set_zorder(10)
     axins.set_xlim(xi1, xi2)
     axins.set_ylim(yi1, yi2)
     axins.set_aspect('equal')
 
     # PathSegment arc
+    corner         = seg_info['corner_vertex']
     ae, ax_e       = seg_info['arc_entry_world'],     seg_info['arc_exit_world']
     ae_ext, ax_ext = seg_info['arc_entry_ext_world'], seg_info['arc_exit_ext_world']
     cpts = res_corner_opt['ctrl_pts']
 
-    axins.plot(arc[:, 0], arc[:, 1], '-.', color='purple', linewidth=1.8, zorder=3,
-               label=f'PathSeg arc  R={seg_info["R"]:.2f} m')
-    axins.plot(*ae,     's', color='purple', markersize=7, zorder=7,
-               label='Arc tangent pts')
-    axins.plot(*ax_e,   's', color='purple', markersize=7, zorder=7)
-    axins.plot(*ae_ext, 'D', color='dimgray', markersize=6, zorder=7,
-               label='Handoff pts')
-    axins.plot(*ax_ext, 'D', color='dimgray', markersize=6, zorder=7)
+    # ---- coverage-corridor shading (d_max half-width), drawn first/lowest ----
+    for p0, p1 in [(ae_ext, corner), (corner, ax_ext)]:
+        p0a, p1a = np.array(p0), np.array(p1)
+        d  = p1a - p0a
+        Lp = np.hypot(*d)
+        n  = np.array([-d[1], d[0]]) / Lp
+        quad = np.array([p0a + D_MAX * n, p1a + D_MAX * n,
+                          p1a - D_MAX * n, p0a - D_MAX * n])
+        axins.fill(quad[:, 0], quad[:, 1], color='khaki', alpha=0.45, zorder=0,
+                    lw=0, label=(r'Coverage corridor ($d_{\max}$)' if p0 is ae_ext
+                                 else None))
+
+    axins.plot(arc[:, 0], arc[:, 1], '-.', color='purple', linewidth=0.9, zorder=3,
+               label=f'PathSegment arc, R={seg_info["R"]:.2f} m')
+    axins.plot(*ae,     's', color='purple', markersize=3, zorder=7)
+    axins.plot(*ax_e,   's', color='purple', markersize=3, zorder=7)
+    axins.plot(*ae_ext, 'D', color='dimgray', markersize=2.6, zorder=7)
+    axins.plot(*ax_ext, 'D', color='dimgray', markersize=2.6, zorder=7)
+
+    # ---- corner vertex marker ----
+    axins.plot(*corner, 'o', color='black', markersize=3, zorder=8,
+               label='Corner vertex')
+
+    # ---- turning-angle beta arc + label (in the clear wedge behind the
+    # vertex, away from the arc/trajectory) ----
+    ang0 = np.degrees(HEADING_IN + np.pi)
+    ang1 = np.degrees(HEADING_OUT + np.pi)
+    theta = np.linspace(np.radians(ang0), np.radians(ang1), 40)
+    beta_r = 0.16
+    axins.plot(corner[0] + beta_r * np.cos(theta),
+               corner[1] + beta_r * np.sin(theta), color='black', lw=0.6,
+               zorder=8)
+    axins.annotate(r'$\beta$', xy=corner + beta_r * 1.9 *
+                    np.array([np.cos(np.mean(theta)), np.sin(np.mean(theta))]),
+                    fontsize=6.5, ha='center', va='center', zorder=8)
+
+    # ---- L_seg / L_T dimension lines (offsets chosen to fall outside the
+    # corridor shading: left of the vertical entry leg, above the
+    # horizontal exit leg; labels on the outer side of each arrow) ----
+    # Symbols only: at 9 cm the 0.5 m L_T arrow is shorter than any
+    # "= 0.50 m" label; the values are listed in Table "params".
+    lseg = r'$L_{\mathrm{seg}}$'
+    lt   = r'$L_T$'
+    _dim_line_outer(axins, corner, ae,     lseg, offset=-0.42, color='black')
+    _dim_line_outer(axins, ae,     ae_ext, lt,   offset=-0.42, color='dimgray')
+    _dim_line_outer(axins, corner, ax_e,   lseg, offset=0.42,  color='black')
+    _dim_line_outer(axins, ax_e,   ax_ext, lt,   offset=0.42,  color='dimgray')
+
+    # ---- extended entry/exit point labels ----
+    axins.annotate(r'$\mathbf{p}_{\mathrm{entry}}^{\mathrm{ext}}$', xy=ae_ext,
+                    xytext=ae_ext + np.array([0.12, -0.05]), fontsize=6.5,
+                    zorder=8)
+    axins.annotate(r'$\mathbf{p}_{\mathrm{exit}}^{\mathrm{ext}}$', xy=ax_ext,
+                    xytext=ax_ext + np.array([0.02, -0.40]), fontsize=6.5,
+                    zorder=8)
 
     # Tail of S1 approaching corner (travelling north — filter by y)
     mask_s1 = s1[:, 1] >= yi1
     if mask_s1.any():
         axins.plot(s1[mask_s1, 0], s1[mask_s1, 1], '-',
-                   color=COL_S1, linewidth=2.0, zorder=4)
+                   color=COL_S1, linewidth=1.1, zorder=4)
 
     # Full corner B-spline + control polygon
-    axins.plot(sc[:, 0], sc[:, 1], '-', color=COL_C, linewidth=2.0, zorder=4)
+    axins.plot(sc[:, 0], sc[:, 1], '-', color=COL_C, linewidth=1.1, zorder=4)
     axins.plot(cpts[:, 0], cpts[:, 1], 'x', color=COL_C,
-               markersize=7, markeredgewidth=1.5, zorder=5)
+               markersize=3, markeredgewidth=0.8, zorder=5,
+               label='B-spline control points')
 
     # Head of S2 leaving corner (travelling east — filter by x)
     mask_s2 = s2[:, 0] <= xi2
     if mask_s2.any():
         axins.plot(s2[mask_s2, 0], s2[mask_s2, 1], '-',
-                   color=COL_S2, linewidth=2.0, zorder=4)
+                   color=COL_S2, linewidth=1.1, zorder=4)
 
-    # Heading arrows on inset (every ~15% of each segment within window)
-    for states, col, mask in [
-        (s1, COL_S1, mask_s1), (sc, COL_C, np.ones(len(sc), dtype=bool)),
-        (s2, COL_S2, mask_s2),
-    ]:
-        sub = states[mask]
-        if len(sub) == 0:
-            continue
-        step = max(1, len(sub) // 7)
-        for st in sub[::step]:
-            dx = 0.08 * np.cos(st[2])
-            dy = 0.08 * np.sin(st[2])
-            axins.annotate('', xy=(st[0]+dx, st[1]+dy), xytext=(st[0], st[1]),
-                           arrowprops=dict(arrowstyle='->', color=col, lw=1.0))
-
-    axins.set_xlabel('x [m]', fontsize=9)
-    axins.set_ylabel('y [m]', fontsize=9)
-    axins.tick_params(labelsize=8)
-    axins.legend(fontsize=7, loc='lower right')
+    axins.tick_params(labelsize=6, length=2, pad=1)
 
     # Connect inset to zoom region on main axes
-    ax.indicate_inset_zoom(axins, edgecolor='black', linewidth=1.2)
+    ax.indicate_inset_zoom(axins, edgecolor='black', linewidth=0.6)
 
-    fig.tight_layout()
+    h_main, l_main = ax.get_legend_handles_labels()
+    h_ins,  l_ins  = axins.get_legend_handles_labels()
+    fig.legend(h_main + h_ins, l_main + l_ins, loc='outside lower center',
+               ncol=2, fontsize=7, handlelength=1.8, columnspacing=1.0)
     _savefig(fig, 'fig_overview.png')
 
 

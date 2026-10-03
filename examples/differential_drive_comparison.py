@@ -123,6 +123,10 @@ ENERGY_COEFFS_LEFT = [
 ]
 P_ELECTRONICS = 2.0
 
+# Corner w_e for Methods B (time-optimal), D (saturation-selected, the
+# fine sweep's w_e* = 2/39 grid point) and C (energy-optimal endpoint).
+WE_B, WE_D, WE_C = 0.0, 0.05128205, 0.4872
+
 COL_A   = 'steelblue'
 COL_B   = 'tomato'
 COL_C   = 'seagreen'
@@ -186,14 +190,46 @@ def _print_coverage_tolerances():
 # PAPER STYLE
 # =============================================================================
 def _set_paper_style():
+    # Font sizes are tuned for figures generated at figsize~(10,4) or
+    # ~(8,8) inches but embedded at width=9cm in the two-column paper
+    # (scale factor ~0.35-0.44x), so source sizes must be ~2.5-3x the
+    # target printed size to stay legible after shrinking.
     plt.rcParams.update({
-        'font.size':       12,
-        'axes.labelsize':  12,
-        'xtick.labelsize': 11,
-        'ytick.labelsize': 11,
-        'legend.fontsize': 10,
-        'axes.titlesize':  12,
+        'font.size':       24,
+        'axes.labelsize':  24,
+        'xtick.labelsize': 20,
+        'ytick.labelsize': 20,
+        'legend.fontsize': 20,
+        'axes.titlesize':  24,
         'axes.grid':       False,
+    })
+
+
+# Printed widths of the paper's figure slots (\includegraphics width=).
+FIG_W_9CM = 9.0 / 2.54
+FIG_W_7CM = 7.0 / 2.54
+
+
+def _set_print_style():
+    """Style for figures drawn at their printed width (FIG_W_9CM /
+    FIG_W_7CM), so font sizes here are the final printed sizes."""
+    plt.rcParams.update({
+        'font.size':         8,
+        'axes.labelsize':    8,
+        'xtick.labelsize':   7,
+        'ytick.labelsize':   7,
+        'legend.fontsize':   7,
+        'axes.titlesize':    8,
+        'axes.linewidth':    0.6,
+        'xtick.major.width': 0.6,
+        'ytick.major.width': 0.6,
+        'lines.linewidth':   1.0,
+        'lines.markersize':  4,
+        'legend.frameon':    False,
+        'axes.grid':         False,
+        # purepursuit_fine_sweep sets 'cm' at import; keep math in the
+        # same sans font as the text across all paper figures.
+        'mathtext.fontset':  'dejavusans',
     })
 
 
@@ -201,7 +237,7 @@ def _set_paper_style():
 # MAIN
 # =============================================================================
 def main():
-    _set_paper_style()
+    _set_print_style()
     # ------------------------------------------------------------------
     # Method A: EulerJLAP full path
     # ------------------------------------------------------------------
@@ -218,18 +254,18 @@ def main():
     # fine-sweep's characteristic solutions (differential_drive_path_
     # segment_fine_sweep.py + analyze_fine_sweep.py):
     #   B -> w_e=0       (time-optimal)
-    #   D -> w_e=0.0769  (Pareto knee -- the automated-selection criterion)
+    #   D -> w_e=0.0513  (peak-power saturation -- the automated-selection criterion)
     #   C -> w_e=0.4872  (energy-optimal sweep endpoint)
     # ------------------------------------------------------------------
     print()
     print("=" * 60)
     print("Methods B, D & C: Segmented pipeline  (shared PathSegment + JLAP + sweep)")
-    print("  B -> corner at w_e=0.0000   (time-optimal)")
-    print("  D -> corner at w_e=0.0769   (knee)")
-    print("  C -> corner at w_e=0.4872   (energy-optimal)")
+    print(f"  B -> corner at w_e={WE_B:.4f}   (time-optimal)")
+    print(f"  D -> corner at w_e={WE_D:.4f}   (saturation-selected)")
+    print(f"  C -> corner at w_e={WE_C:.4f}   (energy-optimal)")
     print("=" * 60)
     seg  = _run_segmented_pipeline()
-    we_b, we_d, we_c = 0.0, 0.0769, 0.4872
+    we_b, we_d, we_c = WE_B, WE_D, WE_C
     res_b = _build_segmented_result(seg, we_b)
     res_d = _build_segmented_result(seg, we_d)
     res_c = _build_segmented_result(seg, we_c)
@@ -346,7 +382,12 @@ def _run_segmented_pipeline(use_cache=True):
     if use_cache and _CACHE_PATH.exists():
         print(f"  Loading cached segmented pipeline from {_CACHE_PATH}")
         with open(_CACHE_PATH, 'rb') as f:
-            return pickle.load(f)
+            seg = pickle.load(f)
+        if _ensure_we_in_cache(seg, WE_D):
+            with open(_CACHE_PATH, 'wb') as f:
+                pickle.dump(seg, f)
+            print(f"  Updated cached segmented pipeline -> {_CACHE_PATH}")
+        return seg
 
     seg_info      = _segment_corner()
     arc_entry_ext = seg_info['arc_entry_ext_world']
@@ -393,6 +434,38 @@ def _run_segmented_pipeline(use_cache=True):
         print(f"  Cached segmented pipeline -> {_CACHE_PATH}")
 
     return result
+
+
+def _ensure_we_in_cache(seg, w_e):
+    """Solve the corner at w_e and add it to seg['sweep']['res_by_we'] if a
+    cache written before w_e was part of the sweep lacks it.
+
+    Warm-starts from the nearest cached weight; B and C stay untouched.
+
+    @return True if seg was modified (caller should re-pickle it).
+    """
+    res_by_we = seg['sweep']['res_by_we']
+    if w_e in res_by_we:
+        return False
+
+    seg_info   = seg['seg_info']
+    corner_wps = _build_corner_waypoints(seg_info['arc_entry_ext_world'],
+                                         seg_info['arc_exit_ext_world'])
+    we_warm = min(res_by_we, key=lambda k: abs(k - w_e))
+    print(f"  Solving corner at w_e={w_e:.4f} (warm start from w_e={we_warm:.4f}) ...")
+    res = _solve_corner(corner_wps, w_e, warm_start=res_by_we[we_warm],
+                        v_entry=seg['v_handoff'], v_exit=seg['v_handoff'],
+                        a_entry=float(seg['res_s1']['acc_path'][-1]),
+                        alpha_entry=float(seg['res_s1']['alpha'][-1]),
+                        max_iter=15000)
+    status = res.get('return_status', 'unknown')
+    if status != 'Solve_Succeeded':
+        raise RuntimeError(f"w_e={w_e:.4f}: IPOPT did not converge (status={status})")
+
+    print(f"  w_e={w_e:.4f}: T_corner = {res['time'][-1]:.3f} s   "
+          f"corner E (OCP) = {float(res['energy']):.3f} J")
+    res_by_we[w_e] = res
+    return True
 
 
 def _build_segmented_result(seg, w_e):
@@ -594,8 +667,8 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
     # Number of Iterations Exceeded"); the original 40-point fine sweep
     # reached this same weight fine via small sequential steps, which this
     # mirrors. Intermediate points are not kept as Method results.
-    we_values  = np.array([0.0, 0.0769, 0.15, 0.25, 0.35, 0.4872])
-    we_targets = {0.0, 0.0769, 0.4872}
+    we_values  = np.array([WE_B, WE_D, 0.0769, 0.15, 0.25, 0.35, WE_C])
+    we_targets = {WE_B, WE_D, 0.0769, WE_C}
 
     peak_powers, total_energies, mission_times, we_valid = [], [], [], []
     prev_res  = None
@@ -617,7 +690,7 @@ def _sweep_we(corner_wps, a_entry=0.0, alpha_entry=0.0, v_handoff=None):
             P_tot  = _compute_corner_power(res)
             T_tot  = float(res['time'][-1])
             peak_p = float(np.max(P_tot))
-            energy = float(res.get('energy', np.trapz(P_tot, dx=0.01)))
+            energy = float(res.get('energy', np.trapezoid(P_tot, dx=0.01)))
             if not (np.isfinite(peak_p) and np.isfinite(energy)):
                 raise ValueError("non-finite result")
             prev_res = res
@@ -752,7 +825,7 @@ def _power_for_jlap(res, dt):
     P = _compute_power_from_accel(res['v'], res['omega'],
                                   res['acc_path'], res['alpha'])
     return {'time': res['time'], 'P': P,
-            'energy': float(np.trapz(P, dx=dt))}
+            'energy': float(np.trapezoid(P, dx=dt))}
 
 
 def _power_for_segmented(res_seg):
@@ -778,7 +851,7 @@ def _power_for_segmented(res_seg):
     P_abs = np.concatenate([P_s1, P_c, P_s2[1:]])
 
     return {'time': t_abs, 'P': P_abs,
-            'energy': float(np.trapz(P_abs, t_abs))}
+            'energy': float(np.trapezoid(P_abs, t_abs))}
 
 
 # =============================================================================
@@ -789,7 +862,7 @@ def _compute_metrics(states, total_time, t_P, P):
     dx    = np.diff(states[:, 0])
     dy    = np.diff(states[:, 1])
     plen  = float(np.sum(np.sqrt(dx**2 + dy**2)))
-    energy = float(np.trapz(P, t_P))
+    energy = float(np.trapezoid(P, t_P))
     # Time-weighted average power (= energy / duration). NOT np.mean(P): the
     # segmented pipeline's P array is sampled non-uniformly in time (corner
     # at dt=0.01, JLAP straights at dt=0.05), so a plain element-wise mean
@@ -838,7 +911,7 @@ def _print_comparison(m_a, m_b, m_d, m_c, we_b, we_d, we_c):
     print()
     print(f"  Method A: EulerJLAPCoverage (full path, Euler spiral corner)")
     print(f"  Method B: Segmented pipeline, corner BSpline w_e={we_b:.4f} (time-optimal)")
-    print(f"  Method D: Segmented pipeline, corner BSpline w_e={we_d:.4f} (Pareto knee)")
+    print(f"  Method D: Segmented pipeline, corner BSpline w_e={we_d:.4f} (saturation-selected)")
     print(f"  Method C: Segmented pipeline, corner BSpline w_e={we_c:.4f} (energy-optimal)")
     print()
 
@@ -846,60 +919,71 @@ def _print_comparison(m_a, m_b, m_d, m_c, we_b, we_d, we_c):
 # =============================================================================
 # FIGURE 1 -- XY trajectory overlay
 # =============================================================================
+def _method_labels(we_b, we_d, we_c):
+    """Legend labels shared by the comparison figures (paper naming)."""
+    return {
+        'A': 'A: Euler spiral (prior)',
+        'B': f'B: $w_e$={we_b:g} (time-opt)',
+        'D': f'D: $w_e$={we_d:.4f}',
+        'C': f'C: $w_e$={we_c:.4f} (energy-opt)',
+    }
+
+
 def _fig1_xy_overlay(res_a, res_b, res_d, res_c, we_b, we_d, we_c):
-    fig, ax = plt.subplots(figsize=(7, 7),
+    lbl = _method_labels(we_b, we_d, we_c)
+    fig, ax = plt.subplots(figsize=(FIG_W_9CM, 4.3), constrained_layout=True,
                            num='Figure 1 - XY Trajectory Overlay')
     ax.set_aspect('equal')
 
     ref = np.array([WP_START, WP_CORNER, WP_END])
-    ax.plot(ref[:, 0], ref[:, 1], '--', color=COL_REF, lw=1.5,
+    ax.plot(ref[:, 0], ref[:, 1], '--', color=COL_REF, lw=0.8,
             label='Reference L-path', zorder=2)
-    ax.plot(ref[:, 0], ref[:, 1], 'o', color='black', ms=8, zorder=6)
+    ax.plot(ref[:, 0], ref[:, 1], 'o', color='black', ms=3.5, zorder=6)
 
     # Method A
     s_a = res_a['states']
-    ax.plot(s_a[:, 0], s_a[:, 1], '-', color=COL_A, lw=2.2,
-            label='A: EulerJLAP', zorder=4)
+    ax.plot(s_a[:, 0], s_a[:, 1], '-', color=COL_A, lw=1.2,
+            label=lbl['A'], zorder=4)
     step = max(1, len(s_a) // 12)
     for st in s_a[::step]:
         ax.annotate('', xy=(st[0] + 0.14*np.cos(st[2]),
                              st[1] + 0.14*np.sin(st[2])),
                     xytext=(st[0], st[1]),
-                    arrowprops=dict(arrowstyle='->', color=COL_A, lw=1.1))
+                    arrowprops=dict(arrowstyle='->', color=COL_A, lw=0.7))
 
     # Methods B, D and C share seg1 and seg2 -- draw them once in a neutral colour
     s_s1 = res_b['res_s1']['states']
     s_s2 = res_b['res_s2']['states']
-    ax.plot(s_s1[:, 0], s_s1[:, 1], '-', color='dimgray', lw=1.8,
-            label='Shared seg1 & seg2  (JLAP)', zorder=3)
-    ax.plot(s_s2[:, 0], s_s2[:, 1], '-', color='dimgray', lw=1.8, zorder=3)
+    ax.plot(s_s1[:, 0], s_s1[:, 1], '-', color='dimgray', lw=1.0,
+            label='Shared seg. 1/2 (JLAP)', zorder=3)
+    ax.plot(s_s2[:, 0], s_s2[:, 1], '-', color='dimgray', lw=1.0, zorder=3)
 
     # Corners B, D, C
-    for res_seg, col, lbl, marker in [
-        (res_b, COL_B, f'B: corner w_e={we_b:.3f} (time-opt)', 'x'),
-        (res_d, COL_D, f'D: corner w_e={we_d:.3f} (knee)', '^'),
-        (res_c, COL_C, f'C: corner w_e={we_c:.3f} (energy-opt)', '+'),
+    for res_seg, col, key, marker in [
+        (res_b, COL_B, 'B', 'x'),
+        (res_d, COL_D, 'D', '^'),
+        (res_c, COL_C, 'C', '+'),
     ]:
         s_c   = res_seg['res_corner']['states']
         cpts  = res_seg['res_corner']['ctrl_pts']
-        ax.plot(s_c[:, 0], s_c[:, 1], '-', color=col, lw=2.2, label=lbl, zorder=5)
+        ax.plot(s_c[:, 0], s_c[:, 1], '-', color=col, lw=1.2, label=lbl[key], zorder=5)
         ax.plot(cpts[:, 0], cpts[:, 1], marker, color=col,
-                ms=8, markeredgewidth=1.5, zorder=6)
+                ms=4, markeredgewidth=0.9, zorder=6)
 
     # Arc entry/exit markers
     ae     = res_b['seg_info']['arc_entry_world']
     ax_e   = res_b['seg_info']['arc_exit_world']
     ae_ext = res_b['seg_info']['arc_entry_ext_world']
     ax_ext = res_b['seg_info']['arc_exit_ext_world']
-    ax.plot(*ae,     's', color='black',  ms=8, zorder=7, label='Arc tangent points')
-    ax.plot(*ax_e,   's', color='black',  ms=8, zorder=7)
-    ax.plot(*ae_ext, 'D', color='dimgray', ms=7, zorder=7, label='JLAP handoff points')
-    ax.plot(*ax_ext, 'D', color='dimgray', ms=7, zorder=7)
+    ax.plot(*ae,     's', color='black',  ms=3.5, zorder=7, label='Arc tangent points')
+    ax.plot(*ax_e,   's', color='black',  ms=3.5, zorder=7)
+    ax.plot(*ae_ext, 'D', color='dimgray', ms=3.2, zorder=7, label='JLAP handoff points')
+    ax.plot(*ax_ext, 'D', color='dimgray', ms=3.2, zorder=7)
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.legend(loc='upper left', fontsize=9)
-    fig.tight_layout()
+    fig.legend(*ax.get_legend_handles_labels(), loc='outside lower center',
+               ncol=2, fontsize=7, handlelength=1.8, columnspacing=1.0)
     _savefig(fig, 'fig_comparison_xy.png')
 
 
@@ -907,21 +991,15 @@ def _fig1_xy_overlay(res_a, res_b, res_d, res_c, we_b, we_d, we_c):
 # FIGURE 2 -- Velocity profiles
 # =============================================================================
 def _fig2_velocity(res_a, res_b, res_d, res_c, we_b, we_d, we_c):
-    fig, ax = plt.subplots(figsize=(10, 4),
+    lbl = _method_labels(we_b, we_d, we_c)
+    fig, ax = plt.subplots(figsize=(FIG_W_9CM, 2.6), constrained_layout=True,
                            num='Figure 2 - Velocity Profiles')
 
-    ax.plot(res_a['time'], res_a['v'],
-            '-', color=COL_A, lw=1.8, label='A: EulerJLAP')
+    ax.plot(res_a['time'], res_a['v'], '-', color=COL_A, label=lbl['A'])
 
-    xform = ax.get_xaxis_transform()
+    specs = [(res_b, COL_B, 'B'), (res_d, COL_D, 'D'), (res_c, COL_C, 'C')]
 
-    specs = [
-        (res_b, COL_B, f'B: Segmented corner w_e={we_b:.3f} (time-opt)', 0.94),
-        (res_d, COL_D, f'D: Segmented corner w_e={we_d:.3f} (knee)', 0.86),
-        (res_c, COL_C, f'C: Segmented corner w_e={we_c:.3f} (energy-opt)', 0.78),
-    ]
-
-    for res_seg, col, lbl, _ in specs:
+    for res_seg, col, key in specs:
         T_s1     = res_seg['T_s1']
         T_corner = res_seg['T_corner']
         t_abs = np.concatenate([
@@ -934,24 +1012,19 @@ def _fig2_velocity(res_a, res_b, res_d, res_c, we_b, we_d, we_c):
             res_seg['res_corner']['v'],
             res_seg['res_s2']['v'][1:],
         ])
-        ax.plot(t_abs, v_abs, '-', color=col, lw=1.8, label=lbl)
+        ax.plot(t_abs, v_abs, '-', color=col, label=lbl[key])
 
-    # Junction markers (S1|C is the same for B, D and C since they share seg1)
-    T_s1 = res_b['T_s1']
-    ax.axvline(T_s1, color=COL_REF, ls=':', lw=1.0)
-    ax.text(T_s1, 0.99, 'S1|C', fontsize=8,
-            color=COL_REF, ha='center', transform=xform)
-    # C|S2 may differ slightly between methods if corner times differ
-    for res_seg, col, lbl, y in specs:
-        t_j = res_seg['T_s1'] + res_seg['T_corner']
-        ax.axvline(t_j, color=col, ls=':', lw=0.9)
-        ax.text(t_j, y, f'C|S2 {lbl[0]}', fontsize=8,
-                color=col, ha='center', transform=xform)
+    # Junction markers (S1|C is the same for B, D and C since they share
+    # seg1; C|S2 differs with each method's corner time). The caption
+    # explains them, so they carry no text labels.
+    ax.axvline(res_b['T_s1'], color=COL_REF, ls=':', lw=0.8)
+    for res_seg, col, _ in specs:
+        ax.axvline(res_seg['T_s1'] + res_seg['T_corner'], color=col, ls=':', lw=0.8)
 
-    ax.set_xlabel('time [s]')
+    ax.set_xlabel('Time [s]')
     ax.set_ylabel('v [m/s]')
-    ax.legend(fontsize=9)
-    fig.tight_layout()
+    fig.legend(*ax.get_legend_handles_labels(), loc='outside lower center',
+               ncol=2, fontsize=7, handlelength=1.8, columnspacing=1.0)
     _savefig(fig, 'fig_comparison_v.png')
 
 
@@ -960,40 +1033,30 @@ def _fig2_velocity(res_a, res_b, res_d, res_c, we_b, we_d, we_c):
 # =============================================================================
 def _fig3_power(pm_a, pm_b, pm_d, pm_c, m_a, m_b, m_d, m_c,
                 res_b, res_d, res_c, we_b, we_d, we_c):
-    fig, ax = plt.subplots(figsize=(10, 4),
+    lbl = _method_labels(we_b, we_d, we_c)
+    fig, ax = plt.subplots(figsize=(FIG_W_9CM, 2.8), constrained_layout=True,
                            num='Figure 3 - Power Profiles')
 
-    ax.plot(pm_a['time'], pm_a['P'], '-', color=COL_A, lw=1.8,
-            label=f"A: EulerJLAP  peak={m_a['peak_power']:.1f} W")
-    ax.plot(pm_b['time'], pm_b['P'], '-', color=COL_B, lw=1.8,
-            label=f"B: corner w_e={we_b:.3f}  peak={m_b['peak_power']:.1f} W")
-    ax.plot(pm_d['time'], pm_d['P'], '-', color=COL_D, lw=1.8,
-            label=f"D: corner w_e={we_d:.3f}  peak={m_d['peak_power']:.1f} W")
-    ax.plot(pm_c['time'], pm_c['P'], '-', color=COL_C, lw=1.8,
-            label=f"C: corner w_e={we_c:.3f}  peak={m_c['peak_power']:.1f} W")
+    for pm, m, col, key in [(pm_a, m_a, COL_A, 'A'), (pm_b, m_b, COL_B, 'B'),
+                            (pm_d, m_d, COL_D, 'D'), (pm_c, m_c, COL_C, 'C')]:
+        ax.plot(pm['time'], pm['P'], '-', color=col,
+                label=f"{lbl[key]}: {m['peak_power']:.1f} W peak")
 
-    ax.axhline(P_ELECTRONICS, color=COL_REF, ls=':', lw=1.0,
-               label=f'P_elec = {P_ELECTRONICS} W')
-
-    for pm, m, col in [(pm_a, m_a, COL_A), (pm_b, m_b, COL_B),
-                       (pm_d, m_d, COL_D), (pm_c, m_c, COL_C)]:
-        idx = int(np.argmax(pm['P']))
-        ax.annotate(f"{m['peak_power']:.1f} W",
-                    xy=(pm['time'][idx], pm['P'][idx]),
-                    xytext=(4, 4), textcoords='offset points',
-                    fontsize=8, color=col)
+    ax.axhline(P_ELECTRONICS, color=COL_REF, ls=':', lw=0.8,
+               label=rf'$P_{{\mathrm{{elec}}}}$ = {P_ELECTRONICS:g} W')
 
     # Junction markers for B, D and C
     for res_seg, col in [(res_b, COL_B), (res_d, COL_D), (res_c, COL_C)]:
         T_s1     = res_seg['T_s1']
         T_corner = res_seg['T_corner']
-        ax.axvline(T_s1,          color=col, ls=':', lw=0.8)
-        ax.axvline(T_s1+T_corner, color=col, ls=':', lw=0.8)
+        ax.axvline(T_s1,          color=col, ls=':', lw=0.6)
+        ax.axvline(T_s1+T_corner, color=col, ls=':', lw=0.6)
 
-    ax.set_xlabel('time [s]')
+    ax.set_ylim(0, 24)
+    ax.set_xlabel('Time [s]')
     ax.set_ylabel('Power [W]')
-    ax.legend(fontsize=9)
-    fig.tight_layout()
+    fig.legend(*ax.get_legend_handles_labels(), loc='outside lower center',
+               ncol=1, fontsize=7, handlelength=1.8)
     _savefig(fig, 'fig_comparison_power.png')
 
 

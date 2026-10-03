@@ -26,9 +26,10 @@
 # enforces:
 #   1. Trailer lateral velocity = 0 (nonholonomic, same as diff-drive)
 #   2. Hitch angle coupling ODE:  lb·dγ/dτ = dθ/dτ·(lb + lf·cos(γ)) + V·T·sin(γ)
-#   3. γ ∈ [−γ_max, γ_max]
+#   3. γ ∈ [−(γ_max − γ_margin), γ_max − γ_margin]
 #   4. Standard feedrate, acceleration, jerk, and time-positivity bounds
 #   5. Optional tractor velocity bounds
+#   6. Optional hitch angular-rate bound |γ̇| ≤ γ_rate_max
 #
 # @section author_doxygen_example Author(s)
 # - Created by Tran Viet Thanh on 2026/06/22
@@ -72,7 +73,9 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
                  gamma_max=0.785,
                  gamma_entry=0.0, gamma_exit=0.0,
                  vel_tractor_max=None,
-                 eps_hitch=0.05):
+                 eps_hitch=0.05,
+                 gamma_margin=0.0,
+                 gamma_rate_max=None):
         """! Constructor.
         @param waypoints<list>: Via-points [[x, y, theta], ...] for the
             trailer rear axle. At least 2.
@@ -107,6 +110,15 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
             than a strict equality, matching the nonholonomic constraint style.
             Default 0.05 (50× looser than eps_nonh to allow the γ B-spline
             to approximate the coupling ODE).
+        @param gamma_margin<float>: Safety margin [rad] subtracted from
+            gamma_max when bounding the γ control points (see
+            _add_jackknife_constraints). Leaves headroom between the planned
+            trajectory and the mechanical jackknife limit for tracking-time
+            disturbance. gamma_max itself is unchanged (still the reported
+            mechanical limit). Default 0.0 preserves prior behavior exactly.
+        @param gamma_rate_max<float|None>: Optional bound on hitch angular
+            rate |γ̇| [rad/s]. None (default) disables the bound, preserving
+            prior behavior exactly.
         """
         super().__init__(
             waypoints=waypoints,
@@ -138,6 +150,10 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
             if vel_tractor_max is not None else None
         )
         self._eps_hitch = float(eps_hitch)
+        self._gamma_margin = float(gamma_margin)
+        self._gamma_rate_max = (
+            float(gamma_rate_max) if gamma_rate_max is not None else None
+        )
 
     def generate_trajectory(self):
         """! Build and solve the OCP for the tractor-trailer system.
@@ -361,6 +377,14 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
             opti.subject_to(self._vel_min[2] * Ti <= ds[i, 2])
             opti.subject_to(ds[i, 2] <= self._vel_max[2] * Ti)
 
+            # 4b. Optional hitch angular-rate bound |γ̇| ≤ gamma_rate_max.
+            # Keeps the plan from demanding hitch dynamics faster than a
+            # tracking controller can realistically hold onto, independent
+            # of the jackknife position bound in _add_jackknife_constraints.
+            if self._gamma_rate_max is not None:
+                opti.subject_to(-self._gamma_rate_max * Ti <= ds[i, 3])
+                opti.subject_to(ds[i, 3] <= self._gamma_rate_max * Ti)
+
             # 5. Acceleration bounds (trailer x, y, θ only — dims 0,1,2)
             for dim in range(3):
                 opti.subject_to(amin[dim] * Ti**2 <= dds[i, dim])
@@ -426,7 +450,8 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
             opti.subject_to(dds[-1, 2] == self._alpha_exit * T[-1]**2)
 
     def _add_jackknife_constraints(self, opti, pg):
-        """! Convex-hull-guaranteed jackknife bound |γ(τ)| ≤ γ_max for all τ.
+        """! Convex-hull-guaranteed jackknife bound |γ(τ)| ≤ γ_max − margin
+        for all τ.
 
         Bounding every γ control point directly, rather than sampling γ(τ)
         at the nt sample nodes, exploits the same B-spline convex-hull
@@ -435,8 +460,13 @@ class BSplineTractorTrailerCoverage(BSplineCoverage):
         local control points, so if all control points satisfy the bound,
         the entire spline arc does too — including between sample nodes,
         which the previous pointwise formulation could not guarantee.
+
+        The bound uses gamma_max − gamma_margin, not gamma_max itself, so the
+        plan leaves headroom from the true mechanical jackknife limit for
+        tracking-time disturbance (gamma_margin defaults to 0.0, i.e. plan
+        right up to gamma_max, matching prior behavior).
         """
-        gamma_max = self._gamma_max
+        gamma_max = self._gamma_max - self._gamma_margin
         for j in range(self._n_Q):
             opti.subject_to(pg[j] <= gamma_max)
             opti.subject_to(-gamma_max <= pg[j])

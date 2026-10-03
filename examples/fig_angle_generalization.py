@@ -10,9 +10,12 @@ os.environ.setdefault('MPLBACKEND', 'Agg')
 import numpy as np
 import matplotlib.pyplot as plt
 
+from matplotlib.lines import Line2D
+
+import differential_drive_comparison as dc
 import differential_drive_path_segment_fine_sweep as m
 
-m._set_paper_style()
+dc._set_print_style()
 
 # (w_e, T [s], E [J], Peak P [W]) per angle, high-to-low w_e as swept.
 DATA_45 = np.array([
@@ -68,41 +71,37 @@ ANGLES = [(45, DATA_45, '#1f77b4', 'o'),
           (90, DATA_90, '#d62728', 's'),
           (135, DATA_135, '#2ca02c', '^')]
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2),
+# Stacked vertically to fit the 9 cm column; panel tags replace titles.
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(dc.FIG_W_9CM, 4.6),
+                                constrained_layout=True,
                                 num='Corner-angle generalisation')
 
 for angle, data, color, marker in ANGLES:
     we, T, E, Pk = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
-    order = np.argsort(we)
-    ax1.plot(we[order], Pk[order], color=color, marker=marker, ms=5,
-              lw=1.5, label=f'{angle}$^\\circ$')
-    # Mark the knee point.
     k = KNEE[angle]
     ki = np.argmin(np.abs(we - k))
-    ax1.scatter([we[ki]], [Pk[ki]], color=color, marker=marker, s=110,
-                edgecolor='black', linewidth=1.0, zorder=5)
+    for ax, x in [(ax1, we), (ax2, E)]:
+        order = np.argsort(x)
+        ax.plot(x[order], Pk[order], color=color, marker=marker, ms=3.5,
+                lw=1.0, label=f'{angle}$^\\circ$')
+        # Outline the per-angle selected weight w_e^corner.
+        ax.scatter([x[ki]], [Pk[ki]], color=color, marker=marker, s=45,
+                   edgecolor='black', linewidth=0.8, zorder=5)
 
 ax1.set_xlabel('$w_e$')
-ax1.set_ylabel('Peak Motor Power [W]')
-ax1.legend(title='Corner angle', fontsize=9)
-ax1.set_title('(a) Peak power saturates to the\nsame floor at every angle')
+ax2.set_xlabel('Total energy [J]')
+# Tags go in each panel's empty upper corner: (a) top-right, (b) top-left.
+for ax, tag, x, ha in [(ax1, '(a)', 0.98, 'right'), (ax2, '(b)', 0.02, 'left')]:
+    ax.set_ylabel('Peak motor power [W]')
+    ax.text(x, 0.95, tag, transform=ax.transAxes, ha=ha, va='top', fontsize=8)
 
-for angle, data, color, marker in ANGLES:
-    we, T, E, Pk = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
-    order = np.argsort(E)
-    ax2.plot(E[order], Pk[order], color=color, marker=marker, ms=5,
-              lw=1.5, label=f'{angle}$^\\circ$')
-    k = KNEE[angle]
-    ki = np.argmin(np.abs(we - k))
-    ax2.scatter([E[ki]], [Pk[ki]], color=color, marker=marker, s=110,
-                edgecolor='black', linewidth=1.0, zorder=5,
-                label=f'{angle}$^\\circ$ knee' if False else None)
+handles, labels = ax1.get_legend_handles_labels()
+handles.append(Line2D([], [], ls='none', marker='o', ms=5, mfc='white',
+                      mec='black', mew=0.8))
+labels.append(r'Outlined: $w_e^{\mathrm{corner}}$')
+fig.legend(handles, labels, loc='outside upper center', ncol=4,
+           title='Corner angle', title_fontsize=7, fontsize=7,
+           handlelength=1.8, columnspacing=1.0)
 
-ax2.set_xlabel('Total Energy [J]')
-ax2.set_ylabel('Peak Motor Power [W]')
-ax2.legend(title='Corner angle', fontsize=9)
-ax2.set_title('(b) Pareto front shape is consistent\nacross angles (outlined markers: knee)')
-
-fig.tight_layout()
 m._savefig(fig, 'fig_angle_generalization.png')
 print('Saved fig_angle_generalization.png')

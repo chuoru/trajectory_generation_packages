@@ -130,14 +130,14 @@ def _track_one_seed(d, mission_time, seed):
     # re-differentiation (see dc._compute_power_uniform's docstring).
     power_ref = dc._compute_power_from_accel(d['v'], d['omega'],
                                              d['acc_path'], d['alpha'])
-    total_energy_ref = float(np.trapz(power_ref, d['time']))
+    total_energy_ref = float(np.trapezoid(power_ref, d['time']))
     peak_power_ref = float(power_ref.max())
 
     v_trk = sim.u_out[0, :nt]
     om_trk = sim.u_out[1, :nt]
     t_trk = sim.t_out[:nt]
     power_trk = pps.compute_motor_power(v_trk, om_trk, t_trk)
-    total_energy_trk = float(np.trapz(power_trk, t_trk))
+    total_energy_trk = float(np.trapezoid(power_trk, t_trk))
     peak_power_trk = float(power_trk.max())
 
     metrics = {
@@ -188,12 +188,13 @@ def _track_multi_seed(label, d, mission_time, n_seeds=N_SEEDS):
 
 
 def main():
+    dc._set_print_style()
     print("Building Method A (EulerJLAP full path) ...")
     a_dict, T_a = _method_a_dict()
 
     print("Building Methods B, D & C (segmented pipeline, shared sweep) ...")
     seg = dc._run_segmented_pipeline()
-    we_b, we_d, we_c = 0.0, 0.0769, 0.4872
+    we_b, we_d, we_c = dc.WE_B, dc.WE_D, dc.WE_C
     res_b = dc._build_segmented_result(seg, we_b)
     res_d = dc._build_segmented_result(seg, we_d)
     res_c = dc._build_segmented_result(seg, we_c)
@@ -250,37 +251,37 @@ def main():
     # Figures for the paper: fig_exp_xy.png, fig_exp_power.png
     # (representative seed=0 run; tables above carry the multi-seed stats)
     # ------------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(6, 6))
-    for lbl, traj, sim, col in [('A', traj_a, sim_a, COL_A),
-                                 ('B', traj_b, sim_b, COL_B),
-                                 ('D', traj_d, sim_d, COL_D),
-                                 ('C', traj_c, sim_c, COL_C)]:
-        ax.plot(traj.x[:, 0], traj.x[:, 1], color=col, ls='--', lw=1.2, alpha=0.6)
-        ax.plot(sim.x_out[0, :], sim.x_out[1, :], color=col, ls='-', lw=2.0,
-                label=f'Method {lbl} (tracked)')
+    # Zoomed on the corner, where the tracking error is visible; the
+    # straight legs add nothing at 7 cm.
+    methods = [('A', traj_a, sim_a, COL_A), ('B', traj_b, sim_b, COL_B),
+               ('D', traj_d, sim_d, COL_D), ('C', traj_c, sim_c, COL_C)]
+    fig, ax = plt.subplots(figsize=(dc.FIG_W_7CM, 3.3), constrained_layout=True)
+    for lbl, traj, sim, col in methods:
+        ax.plot(traj.x[:, 0], traj.x[:, 1], color=col, ls=(0, (3, 2)), lw=0.7)
+        ax.plot(sim.x_out[0, :], sim.x_out[1, :], color=col, ls='-', lw=1.0,
+                alpha=0.9, label=f'Method {lbl}')
+    ax.plot([], [], color='gray', ls=(0, (3, 2)), lw=0.7, label='Reference (dashed)')
+    ax.set_xlim(3.4, 5.5)
+    ax.set_ylim(-0.4, 1.7)
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
     ax.set_aspect('equal')
-    ax.legend(fontsize=9)
-    ax.set_title('Closed-loop tracking under GPS/IMU noise (seed 0 of '
-                 f'{N_SEEDS})\n(dashed: reference, solid: tracked)')
-    fig.tight_layout()
+    fig.legend(*ax.get_legend_handles_labels(), loc='outside lower center',
+               ncol=3, fontsize=6.5, handlelength=1.6, columnspacing=0.8)
     _savefig(fig, 'fig_exp_xy.png')
 
-    fig2, ax2 = plt.subplots(figsize=(7, 4.2))
-    for lbl, traj, sim, col in [('A', traj_a, sim_a, COL_A),
-                                 ('B', traj_b, sim_b, COL_B),
-                                 ('D', traj_d, sim_d, COL_D),
-                                 ('C', traj_c, sim_c, COL_C)]:
+    fig2, ax2 = plt.subplots(figsize=(dc.FIG_W_7CM, 2.4), constrained_layout=True)
+    for lbl, traj, sim, col in methods:
         nt = sim.t_out.shape[0]
         P_trk = pps.compute_motor_power(sim.u_out[0, :nt], sim.u_out[1, :nt], sim.t_out[:nt])
-        ax2.plot(sim.t_out[:nt], P_trk, color=col, lw=1.8, label=f'Method {lbl}')
-    ax2.axhline(pps.P_ELECTRONICS, color='k', ls=':', lw=1, label='Hotel load')
+        ax2.plot(sim.t_out[:nt], P_trk, color=col, lw=0.8, alpha=0.9,
+                 label=f'Method {lbl}')
+    ax2.axhline(pps.P_ELECTRONICS, color='k', ls=':', lw=0.8,
+                label=r'$P_{\mathrm{elec}}$')
     ax2.set_xlabel('Time [s]')
     ax2.set_ylabel('Total motor power [W]')
-    ax2.legend(fontsize=9)
-    ax2.set_title(f'Tracked total electrical power P(t) (seed 0 of {N_SEEDS})')
-    fig2.tight_layout()
+    fig2.legend(*ax2.get_legend_handles_labels(), loc='outside lower center',
+                ncol=3, fontsize=6.5, handlelength=1.6, columnspacing=0.8)
     _savefig(fig2, 'fig_exp_power.png')
 
     plt.close('all')

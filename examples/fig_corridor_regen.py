@@ -45,13 +45,14 @@ def _corridor_band(wps, bound, ax):
         n = np.array([-d[1], d[0]]) / L
         quad = np.array([p0 + bound * n, p1 + bound * n,
                           p1 - bound * n, p0 - bound * n])
-        ax.fill(quad[:, 0], quad[:, 1], color='khaki', alpha=0.4,
-                 label='Corridor ($d_{max}$=%.2f m)' % bound if i == 0 else None)
+        ax.fill(quad[:, 0], quad[:, 1], color='khaki', alpha=0.4, lw=0,
+                 label=r'Corridor ($d_{\max}$=%.2f m)' % bound if i == 0 else None)
 
 
 def main():
+    dc._set_print_style()
     seg = dc._run_segmented_pipeline()
-    we_b, we_d, we_c = 0.0, 0.0769, 0.4872
+    we_b, we_d, we_c = dc.WE_B, dc.WE_D, dc.WE_C
     res_b = dc._build_segmented_result(seg, we_b)
     res_d = dc._build_segmented_result(seg, we_d)
     res_c = dc._build_segmented_result(seg, we_c)
@@ -74,32 +75,28 @@ def main():
     T_d, s_d, E_d, states_d = _metrics(res_d)
     T_c, s_c, E_c, states_c = _metrics(res_c)
 
-    fig, ax = plt.subplots(figsize=(6, 6))
+    # Zoomed on the corner only; per-method T/s/E are in Table "metrics".
+    # y starts just below 0 so the corridor's lower edge (y=-d_max) shows.
+    fig, ax = plt.subplots(figsize=(dc.FIG_W_9CM, 3.9), constrained_layout=True)
     _corridor_band(corner_wps, bound, ax)
     wp_xy = np.array([[p[0], p[1]] for p in corner_wps])
-    ax.plot(wp_xy[:, 0], wp_xy[:, 1], '--', color='gray', lw=1.2, label='Reference path')
-    ax.plot(states_b[:, 0], states_b[:, 1], color=COL_B, lw=2.2,
-             label=f'Time-optimal (B, $w_e$={we_b:.3f})')
-    ax.plot(states_d[:, 0], states_d[:, 1], color=COL_D, lw=2.2, ls='-.',
-             label=f'Knee (D, $w_e$={we_d:.3f})')
-    ax.plot(states_c[:, 0], states_c[:, 1], color=COL_C, lw=2.2, ls='--',
-             label=f'Energy-optimal (C, $w_e$={we_c:.3f})')
-    ax.plot(*wp_xy[0, :2], 'o', color='black', ms=6, zorder=5)
-    ax.plot(*wp_xy[-1, :2], 's', color='black', ms=6, zorder=5)
+    ax.plot(wp_xy[:, 0], wp_xy[:, 1], '--', color='gray', lw=0.8, label='Reference path')
+    ax.plot(states_b[:, 0], states_b[:, 1], color=COL_B, lw=1.3,
+             label=f'B: time-optimal ($w_e$={we_b:g})')
+    ax.plot(states_d[:, 0], states_d[:, 1], color=COL_D, lw=1.3, ls='-.',
+             label=f'D: sat.-selected ($w_e$={we_d:.4f})')
+    ax.plot(states_c[:, 0], states_c[:, 1], color=COL_C, lw=1.3, ls='--',
+             label=f'C: energy-optimal ($w_e$={we_c:.4f})')
+    ax.plot(*wp_xy[0, :2], 'o', color='black', ms=4, zorder=5)
+    ax.plot(*wp_xy[-1, :2], 's', color='black', ms=4, zorder=5)
 
-    txt = (f"Time-optimal (B):   T={T_b:.2f} s | s={s_b:.3f} m | E={E_b:.2f} J\n"
-           f"Knee (D):           T={T_d:.2f} s | s={s_d:.3f} m | E={E_d:.2f} J\n"
-           f"Energy-optimal (C): T={T_c:.2f} s | s={s_c:.3f} m | E={E_c:.2f} J")
-    ax.text(0.02, 0.55, txt, transform=ax.transAxes, fontsize=9,
-             va='top', ha='left',
-             bbox=dict(boxstyle='round', fc='white', ec='gray', alpha=0.9))
-
+    ax.set_xlim(3.5, 5.3)
+    ax.set_ylim(-0.3, 1.6)
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
     ax.set_aspect('equal')
-    ax.legend(fontsize=8, loc='upper right')
-    ax.set_title('Corner corridor: Method B vs. D vs. C')
-    fig.tight_layout()
+    fig.legend(*ax.get_legend_handles_labels(), loc='outside lower center',
+               ncol=2, fontsize=7, handlelength=2.2, columnspacing=1.0)
 
     if SAVE_FIGS:
         out = FIG_OUT_DIR / 'fig_corridor.png'
@@ -107,7 +104,7 @@ def main():
         print(f'[paper] Saved fig_corridor.png -> {out}')
 
     print(f'\n  Time-optimal (B):   T={T_b:.3f} s  s={s_b:.4f} m  E={E_b:.3f} J')
-    print(f'  Knee (D):           T={T_d:.3f} s  s={s_d:.4f} m  E={E_d:.3f} J')
+    print(f'  Sat.-selected (D):  T={T_d:.3f} s  s={s_d:.4f} m  E={E_d:.3f} J')
     print(f'  Energy-optimal (C): T={T_c:.3f} s  s={s_c:.4f} m  E={E_c:.3f} J')
 
 
